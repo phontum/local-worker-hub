@@ -1,0 +1,172 @@
+from typing import Literal
+from pydantic import BaseModel, Field, model_validator
+from pathlib import Path
+import re
+
+Role = Literal['investigator', 'editor', 'validator', 'researcher', 'personal']
+
+class Check(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    argv: list[str] = Field(min_length=1, max_length=30)
+    cwd: str = '.'
+    timeout: int = Field(default=300, ge=1, le=600)
+    env_allowlist: list[str] = Field(default_factory=list, max_length=20)
+    environment: dict[str, str] = Field(default_factory=dict, max_length=20)
+    required_env: list[str] = Field(default_factory=list, max_length=20)
+    depends_on: list[str] = Field(default_factory=list, max_length=12)
+    requires_test_database: bool = False
+    guard_next_dev: bool = False
+
+class JobRequest(BaseModel):
+    role: Role = 'investigator'
+    workflow: Literal['single', 'implement'] = 'single'
+    repair_attempts: int = Field(default=0, ge=0, le=2)
+    investigate_first: bool = False
+    model_context: Literal[16384, 32768] | None = None
+    model_thinking: bool | None = None
+    review_pass: bool | None = None
+    execution_preset: Literal['small', 'work', 'extended'] | None = None
+    read_paths: list[str] = Field(default_factory=list, max_length=30)
+    evidence_job_ids: list[str] = Field(default_factory=list, max_length=4)
+    handoff_id: str | None = Field(default=None, max_length=200)
+    task: str = Field(min_length=1, max_length=12000)
+    repo: str | None = None
+    allowed_paths: list[str] = Field(default_factory=list, max_length=30)
+    checks: list[Check] = Field(default_factory=list, max_length=12)
+    context: str = Field(default='', max_length=16000)
+    caller: str = Field(default='cli', max_length=80)
+    caller_session: str | None = Field(default=None, max_length=200)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+    timeout: int = Field(default=300, ge=1, le=1800)
+    no_recovery: bool = False
+    summary_mode: Literal['none', 'local'] = 'none'
+    failure_policy: Literal['fail_fast', 'continue_independent'] = 'fail_fast'
+    source_job_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
+    profile_hash: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
+    profile_ref: str | None = Field(default=None, pattern=r'^[a-f0-9]{12}$')
+    check_groups: list[str] = Field(default_factory=list, max_length=12)
+    parameters: dict[str, str] = Field(default_factory=dict, max_length=20)
+
+    @model_validator(mode='after')
+    def boundaries(self):
+        if self.execution_preset == 'small' and 'timeout' not in self.model_fields_set:
+            self.timeout = 120
+        if not self.task.strip(): raise ValueError('Task is empty')
+        if self.role not in ('researcher', 'personal'):
+            if not self.repo: raise ValueError('This role requires an explicit repository')
+            p = Path(self.repo).expanduser().resolve(strict=True)
+            if not p.is_dir() or p in (Path('/'), Path.home()):
+                raise ValueError('Select a project directory, not the home directory or filesystem root')
+            self.repo = str(p)
+        elif self.repo or self.context or self.allowed_paths or self.read_paths or self.evidence_job_ids or self.checks or self.source_job_id or self.profile_hash or self.profile_ref or self.check_groups or self.parameters:
+            raise ValueError('Public web roles accept a public task brief only; no repository/context/checks')
+        if any(not re.fullmatch(r'[a-f0-9]{32}', ident) for ident in self.evidence_job_ids):
+            raise ValueError('Invalid evidence job ID')
+        if self.read_paths and self.role not in ('investigator','editor'):
+            raise ValueError('Read scope requires Investigator or Editor')
+        if self.role == 'editor' and not self.allowed_paths:
+            raise ValueError('Editor requires explicit allowed_paths')
+        if self.workflow == 'implement' and self.role != 'editor':
+            raise ValueError('Implement workflow requires Editor and exact allowed_paths')
+        if self.workflow == 'implement' and not (self.checks or self.profile_hash or self.profile_ref):
+            raise ValueError('Implement workflow requires supplied validation checks')
+        if self.workflow == 'single' and (self.repair_attempts or self.investigate_first):
+            raise ValueError('Repair and initial investigation require implement workflow')
+        if self.allowed_paths and self.role != 'editor': raise ValueError('Only Editor accepts edit scope')
+        if self.checks and self.role not in ('editor', 'validator'): raise ValueError('Checks require Editor or Validator')
+        if self.source_job_id and (self.role != 'validator' or self.checks or self.profile_hash or self.profile_ref):
+            raise ValueError('Saved-result analysis requires Validator without commands or a profile')
+        if self.role == 'validator' and not (self.checks or self.source_job_id or self.profile_hash or self.profile_ref): raise ValueError('Validator requires checks')
+        if self.profile_hash and self.profile_ref: raise ValueError('Use either profile hash or profile ref')
+        if bool(self.profile_hash or self.profile_ref) != bool(self.check_groups): raise ValueError('Profile reference and check groups are required together')
+        if (self.profile_hash or self.profile_ref) and self.role not in ('validator','editor'): raise ValueError('Profiles select Validator or Editor checks only')
+        if self.parameters and not (self.profile_hash or self.profile_ref): raise ValueError('Parameters require a reviewed profile')
+        names = [c.name for c in self.checks]
+        if len(set(names)) != len(names): raise ValueError('Check names must be unique')
+        pending = {c.name: set(c.depends_on) for c in self.checks}
+        if any(deps - set(names) for deps in pending.values()): raise ValueError('Unknown check dependency')
+        done = set()
+        while pending:
+            ready = [n for n, deps in pending.items() if deps <= done]
+            if not ready: raise ValueError('Check dependencies contain a cycle')
+            done.update(ready)
+            for n in ready: del pending[n]
+        for check in self.checks:
+            reserved = {'HOME','PWD','LOCAL_WORKER_STATE','LOCAL_WORKER_CONFIG','OPENCODE_CONFIG_CONTENT'}
+            if reserved.intersection([*check.env_allowlist, *check.environment, *check.required_env]):
+                raise ValueError('Reserved environment variable requested')
+            if any('\x00' in x for pair in check.environment.items() for x in pair): raise ValueError('Invalid environment value')
+            if any('\x00' in x for x in check.argv): raise ValueError('Invalid command argument')
+            if Path(check.cwd).is_absolute() or '..' in Path(check.cwd).parts:
+                raise ValueError('Check cwd must be within the repository')
+        return self
+
+    def context_limit(self):
+        return self.model_context or (32768 if self.execution_preset == 'extended' else 16384)
+
+    def model_budget(self):
+        return self.timeout
+
+    def needs_answer_review(self):
+        # Implementation already has an independent review. Direct validation
+        # remains deterministic, including when extended context was requested.
+        if self.workflow == 'implement' or (self.role == 'validator' and self.summary_mode == 'none' and not self.source_job_id):
+            return False
+        return self.review_pass if self.review_pass is not None else self.execution_preset == 'extended'
+
+class EvidenceReference(BaseModel):
+    source: str = Field(min_length=1, max_length=30)
+    quote: str = Field(min_length=1, max_length=2000)
+
+class RequirementAssessment(BaseModel):
+    requirement: str = Field(min_length=1, max_length=1000)
+    status: Literal['met', 'unmet', 'unknown']
+    evidence: str = Field(min_length=1, max_length=2000)
+    evidence_refs: list[EvidenceReference] = Field(max_length=8)
+
+class WebClaim(BaseModel):
+    url: str = Field(min_length=1,max_length=2048)
+    source: str = Field(min_length=1,max_length=30)
+    quote: str = Field(min_length=1,max_length=2000)
+
+class WebRequirement(BaseModel):
+    id: str = Field(min_length=1,max_length=30,description='Requirement ID such as Q1; distinct from tool-evidence IDs R0, R1, etc.')
+    task_quote: str = Field(min_length=1,max_length=2000)
+    requirement: str = Field(min_length=1,max_length=1000)
+    acceptance: str = Field(min_length=1,max_length=1500)
+
+class WebResearchPlan(BaseModel):
+    objective: str = Field(min_length=1,max_length=1500)
+    needs_current_evidence: bool
+    requirements: list[WebRequirement] = Field(min_length=1,max_length=15)
+    strategy: list[str] = Field(min_length=1,max_length=8)
+    result_format: str = Field(min_length=1,max_length=1000)
+    stop_when: str = Field(min_length=1,max_length=1000)
+
+class AnswerReview(BaseModel):
+    status: Literal['COMPLETE', 'PARTIAL', 'BLOCKED']
+    findings: str = Field(min_length=1)
+    files: str = Field(min_length=1)
+    checks: str = Field(min_length=1)
+    risks: str = Field(min_length=1)
+    requirements: list[RequirementAssessment] = Field(min_length=1, max_length=50)
+    web_claims: list[WebClaim] = Field(default_factory=list,max_length=16)
+
+    @model_validator(mode='after')
+    def conservative_completion(self):
+        # The assessed original requirements determine completion. Protocol
+        # finalization (e.g. tools being disabled) is not an extra user task.
+        if all(r.status == 'met' for r in self.requirements):self.status = 'COMPLETE'
+        elif self.status == 'COMPLETE':self.status = 'PARTIAL'
+        return self
+
+class Review(BaseModel):
+    decision: Literal['accepted', 'rejected', 'takeover']
+    notes: str = Field(default='', max_length=4000)
+    baseline_frontier_tokens: int | None = Field(default=None, ge=0)
+    delegated_frontier_tokens: int | None = Field(default=None, ge=0)
+    baseline_frontier_cost: float | None = Field(default=None, ge=0)
+    delegated_frontier_cost: float | None = Field(default=None, ge=0)
+    measurement_source: Literal['measured', 'manual_estimate'] = 'measured'
+    task_outcome: Literal['completed', 'partial', 'blocked'] | None = None
+    review_effort_seconds: int | None = Field(default=None, ge=0)

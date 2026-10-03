@@ -1,0 +1,16 @@
+{
+  "repo": "/absolute/path/to/your-project",
+  "constraints": "Run only reviewed checks. Preserve user changes. No installs, migrations, deployments or production credentials during validation.",
+  "prerequisites": ["Dependencies must already be installed."],
+  "source_files": ["package.json"],
+  "parameter_names": [],
+  "baseline_notes": [],
+  "groups": {
+    "typecheck": [
+      {"name": "typecheck", "argv": ["npm", "run", "typecheck"], "cwd": ".", "timeout": 120}
+    ],
+    "unit": [
+      {"name": "unit", "argv": ["npm", "run", "test"], "cwd": ".", "timeout": 300}
+    ]
+  }
+}
