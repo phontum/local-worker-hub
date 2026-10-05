@@ -64,7 +64,9 @@ async def langsearch_results(query):
 
 def provider_order(config):
     chosen = config.get('search_provider', 'exa')
-    order = {'searxng': ['searxng', 'exa', 'langsearch'], 'exa': ['exa', 'langsearch'], 'langsearch': ['langsearch', 'exa']}[chosen]
+    # With SearXNG chosen, a down container falls to the keyed LangSearch before the keyless Exa endpoint, which is the one that rate-limits.
+    # LangSearch without a key fails at once and the order simply continues to Exa.
+    order = {'searxng': ['searxng', 'langsearch', 'exa'], 'exa': ['exa', 'langsearch'], 'langsearch': ['langsearch', 'exa']}[chosen]
     return order
 
 async def search(query, config, audit):
@@ -78,7 +80,7 @@ async def search(query, config, audit):
                 results = await exa(query)
             else:
                 results = await langsearch_results(query)
-        except (ProviderUnavailable, ValueError, OSError, httpx.HTTPError, TimeoutError) as error:
+        except Exception as error:  # a provider that fails in any way must not take the job down; the reason is reported and the next one is tried
             failures.append(f'{provider}: {str(error)[:120] or type(error).__name__}')
             continue
         if results:

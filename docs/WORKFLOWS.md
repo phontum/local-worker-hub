@@ -393,7 +393,8 @@ schema-constrained decision and then reads and writes text.
 
 1. Decide (one JSON call): does this need the web, up to two search queries, the reply language, and optionally a
    structured provider with its arguments (see below). A follow-up chat message also sees up to six earlier turns.
-2. Search (`hub/retrieval.py`): SearXNG, then Exa, then LangSearch, with every fallback reported.
+2. Search (`hub/retrieval.py`): the configured provider first, then the others, with every fallback reported and any provider failure
+   isolated (a rate limit never ends the job). With SearXNG chosen the order is SearXNG, LangSearch, Exa; with Exa, Exa then LangSearch.
 3. Read the best three pages live through the DNS-pinned origin reader. Main text is extracted with trafilatura.
    A page that cannot be read falls back to a labelled third-party copy, or to its search snippet.
 4. Rank 900-character passages with BM25 and give the model numbered excerpts with their kind and read time.
