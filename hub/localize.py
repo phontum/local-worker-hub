@@ -54,6 +54,8 @@ def symbols(path, text):
         return regex_symbols(text, GENERIC)
     return []
 
+PROTOCOL_WORDS = {'SEARCH', 'REPLACE', 'WHOLE', 'DELETE', 'FILE', 'LOCAL_WORKER_REPORT', 'END_LOCAL_WORKER_REPORT'}
+
 def identifiers(task):
     """Names worth a literal search: backticked or quoted text, snake_case, CamelCase, UPPER_CASE, dotted paths."""
     found = re.findall(r'`([^`\n]{2,80})`', task) + re.findall(r'"([^"\n]{3,60})"', task) + re.findall(r"'([^'\n]{3,60})'", task)
@@ -62,6 +64,8 @@ def identifiers(task):
     out = []
     for item in found:
         item = item.strip()
+        if item in PROTOCOL_WORDS:  # edit-protocol words from the caller's own phrasing are not names in the code
+            continue
         if item and item not in out and len(out) < 6:
             out.append(item)
     return out

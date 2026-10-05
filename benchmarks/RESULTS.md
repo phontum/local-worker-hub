@@ -515,3 +515,86 @@ private editor workspace graded after a real `apply`. Editor runs also required 
   grader 6/6 (host `reproduces_bug` true, hidden reference: fails on the bug and passes with the fix).
 - Held-out check on this repository (6 path-and-value lookups, Gemma): 6/6 correct; 3 of 6 first ended PARTIAL because the model cited in prose
   ("at line 19"). The host now also accepts "file ... line N" phrasing when the line was actually read.
+
+## Editor safety, Release 1 (frontier-incident fixes) — 2026-10-05
+
+Changes under test: truncation detected and zero edits applied, strict transactional edit protocol, destructive-edit guard, cumulative host-written reports,
+packet for in-place jobs, post-edit verification of `old -> new` mappings, a regression test must define the failing test on an added line, checks run
+without bytecode caching. Gemma 4 12B, 16K, work preset, 3 repeats.
+
+**Frontier-incident benchmark** (`benchmarks/eval_incidents.py`, synthetic fixtures, 12 jobs: the oversized ten-change task and the same work split into three bounded jobs):
+
+| | Before the mapping check | After |
+| --- | --- | --- |
+| Correct | 6/12 | 6/12 |
+| Honest (correct, or not claimed COMPLETE) | 9/12 | 12/12 |
+| COMPLETE but wrong | 3 (all: renames partly undone) | 0 |
+| Destructive-edit escapes, partial applications, silent truncations | 0, 0, 0 | 0, 0, 0 |
+| Truncations detected | 1 | 0 |
+
+- The oversized task did not overflow the output cap with Gemma on this fixture (it finished in about 17 s); the real failure came from a larger file and much longer
+  blocks, so truncation, destructive replacements and half-applied jobs are covered by deterministic replays (`tests/test_edit_incidents.py`) rather than by this live case.
+- The only live false-COMPLETE class found was the model reporting COMPLETE with some of the requested renames undone; the host now verifies stated mappings.
+
+**`eval_junior.py` regression guard** (22 cases x3): 89.4% correct against 90.9% before (one run), COMPLETE-but-wrong 3 (all `cmp-reports`, a model limit, unchanged), median 6.1 s.
+Editor shapes: 25/27 (mechanical 6/6, guard 6/6, fix a failing test 8/9, regression test 5/6) against 27/27 earlier, with zero editor false-COMPLETE:
+
+- `ft-cache` once ended PARTIAL after three SEARCH mismatches and one generation that ran to the 4096-token cap; the report listed every turn, said the output was cut off and wrote nothing. The shape was 8/9 in an earlier run too.
+- `rt-retry-sleep` once ended PARTIAL because the model edited an existing test to fail instead of adding one. Before the fix the same run was accepted (the host's red check counted any newly failing test). That
+  run exposed that checks could execute stale bytecode when a same-size edit follows a baseline run within one second; checks now run with `PYTHONDONTWRITEBYTECODE=1`.
+- Caveats: one model, two small fixtures, 3 repeats; the live runs cannot reproduce the original truncation, so the incident fixes rest on the replay tests. The 8K output cap and JSON edits were not evaluated, as planned.
+
+## Editor reliability, Release 2 (context packing, gate, workspace hardening, wrappers) — 2026-10-05
+
+Changes under test: context packing (whole file when it fits the budget, named texts always shown, read-only references), the complexity gate with proposed split, deletion
+semantics, dependency hashes, revalidation, post-apply checks and revert, MCP wrappers, a repair skipped when time is short. Gemma 4 12B, 16K, 3 repeats.
+
+| | Release 1 | Release 2 |
+| --- | --- | --- |
+| Incident benchmark, correct (12 jobs) | 6/12 | **12/12** (the three split jobs now all pass as one outcome, 3/3) |
+| Incident benchmark, COMPLETE but wrong / destructive escapes / partial applications / silent truncations | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+| `eval_junior`, correct (66 runs) | 89.4% | **92.4%** |
+| `eval_junior` editor shapes | 25/27 | 26/27 (mechanical 6/6, guard 6/6, fix a failing test 9/9, regression test 5/6) |
+| `eval_junior`, COMPLETE but wrong | 3 (all `cmp-reports`) | 3 (all `cmp-reports`) |
+
+- The rename job that was COMPLETE-but-incomplete in Release 1 is now correct in all runs: the model sees the whole file and the notes about texts it cannot find, so the mapping check had nothing left to
+  catch (it remains as a safety net). The one regression-test miss is the same honest PARTIAL as before (the model edits an existing test instead of adding one).
+- The gate did not trip on the incident benchmark's one-job task, which Gemma completes correctly in about 18 s. It is calibrated on the two real failures (11 behavioural clauses / 2.9k characters, and 9 renames + 8
+  mapped values + 8 behaviours) against every job that succeeded; with two positive examples the thresholds are a starting point, to be recalibrated from `local-worker incident` records.
+- **Manual round trip through the MCP tools on a scratch repository (live service):** an implement task with nine renames and nine behaviours was refused before any model call with a four-unit proposed split;
+  `fix_failing_test` returned COMPLETE with the tree untouched and a packet saying `review_patch_then_apply_result`; `apply_result` after a concurrent edit refused with the conflict list; with the file restored,
+  `apply_result(revalidate, run_checks)` applied it and the post-apply check passed; `revert_result` restored the original bytes. A first attempt used `python` as the test command and the check was reported
+  `blocked` (`No such file or directory: 'python'`): checks run with the service's PATH, so frontier-supplied commands should name an interpreter that exists there.
+- Not measured: automatic decomposition (not built), the 8K output cap, JSON edits, line-anchored SEARCH.
+
+
+## Editor experiments, Release 3 — 2026-10-05
+
+Five things were tried on a workload that really overflows the output cap: `benchmarks/eval_editor_experiments.py` builds a synthetic file of N handlers (about 25 lines each) and asks for the same structural change
+(wrap in try/catch with that handler's number) in every one. Variants are set per request and checked from the job's own records. Gemma 4 12B, 16K, 3 runs per cell.
+
+| Variant | 8 handlers (about 4.3k output tokens) | 16 handlers (about 9k) |
+| --- | --- | --- |
+| Release 2 code (no continuation), 4K cap | 0/3 (all cut off at 4096, nothing applied, 68 s each) | not run |
+| **Continuation**, 4K cap | **3/3** (2 generations, 79 s) | **3/3** (3 generations, 155 s) |
+| 8K cap, no continuation | 3/3 (one generation, 70 s) | 0/3 (cut off at 8192, 131 s, nothing applied) |
+| 8K cap with continuation | 3/3 (70 s, never needed) | 3/3 (2 generations, 147 s) |
+| Continuation + JSON format | 3/3 (76 s) | 3/3 (154 s) |
+| Continuation + line-anchored matching | 3/3 (76 s) | not run |
+
+- **Continuation is the fix.** It turns the incident's failure (everything lost) into a normal completion at the cost of one or two short extra turns. The 8K cap helps only tasks between 4K and 8K tokens, and with
+  continuation it saves about 5% of the time on the largest case, so the default stays 4096. The new defaults reproduced these results (8 and 16 handlers: 3/3 each).
+- **The complexity gate was blind to this workload** (it scored the task as 3 concerns) and **refused work the model does well**: on a gate-tripping 15-change task over the incident fixture, refusing took 1 s and
+  produced nothing; one-shot was 3/3 correct in 20 s (about 1,100 output tokens). It is now advisory by default.
+- **Automatic decomposition did not beat one-shot.** Three versions on that task, 3 runs each, all 0/3 correct (always PARTIAL, honest): units with only their own clauses lost what "these exact labels" refers to;
+  units shown the whole task did each other's work and failed on blocks whose text was already changed; with tolerant units every part landed except the test-file label updates, which were only partly done. One-shot with
+  continuation remains better (3/3, about 20 s against about 37 s and 5 generations). It stays as an opt-in experiment.
+- **Line-anchored matching** is safe: replaying 581 recorded SEARCH blocks of earlier runs, 540 matched uniquely and all 540 were whole-line aligned (36 needed the whitespace-tolerant path, 5 were ambiguous, none cut
+  through a word); the live runs since recorded 120 exact matches, all whole-line. Editor shapes with line mode: 25/27 against 26/27 (the difference is the known flaky `ft-cache` run). It is now the default.
+- **JSON edit format** matched the text format on the heavy workload (same correctness, tokens and time) but was clearly worse on ordinary small edits: editor shapes 20/27 against 26/27 (fix a failing test 6/9, regression
+  test 2/6). It stays off.
+- **Workspace chaining**: the incident benchmark's split case run as three chained jobs and applied once: 9/9 jobs correct, 3/3 as one outcome, same time as three separate jobs, one apply instead of three.
+- **Final defaults, full regression guards:** incident benchmark 12/12 correct (0 false-COMPLETE, 0 destructive edits, 0 partial applications, 0 silent truncations); `eval_junior` 89.4% correct (editor shapes 26/27, the same as
+  before; the movement from 92.4% is in investigator shapes whose code did not change, so run-to-run variation).
+- Caveats: one model, synthetic fixtures, 3 runs per cell. The heavy workload is a repeated structural change, one kind of overflow; tasks that overflow because they need many different long edits may behave differently.
+  The gate thresholds still rest on two real failures.

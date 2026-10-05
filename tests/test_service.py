@@ -1,8 +1,10 @@
+import json
 import pytest
 from fastapi.testclient import TestClient
 from hub.models import JobRequest, Review
 from hub.settings import initialize
 from hub.service import create_app
+from hub.model_registry import model_name
 
 def task(repo,key='one',**kw):return JobRequest(repo=str(repo),task='Inspect app.ts',idempotency_key=key,**kw)
 
@@ -15,7 +17,7 @@ def test_idempotency_queue_cancel_review_and_restart(store,repo):
     assert store.next() is None
     store.finish(second['id'],'completed',{'usage':{'output':2}})
     assert store.get(second['id'])['state']=='cancelled'
-    store.review(job['id'],Review(decision='takeover',baseline_frontier_tokens=100,delegated_frontier_tokens=120))
+    store.review(job['id'],Review(decision='takeover',notes='Took over: the edit was cut off',baseline_frontier_tokens=100,delegated_frontier_tokens=120))
     assert store.summary()['estimated_frontier_tokens_avoided']==-20
     assert store.summary()['api_equivalent_usd'] is None
 
@@ -87,3 +89,23 @@ def test_dashboard_chat_flow_options_submission_and_csrf(store,monkeypatch):
         assert job['request']['model']=='qwen' and job['request']['caller']=='dashboard' and len(job['request']['history'])==2
         assert c.post('/api/jobs',json={**body,'idempotency_key':'chat-2','model':'gpt-9'},headers=origin).status_code==422
         assert c.post('/api/jobs',json={**body,'idempotency_key':'chat-3','context':'private notes'},headers=origin).status_code==422
+
+
+def test_the_inference_gateway_allows_an_8192_output_budget_only_for_jobs_that_asked_for_it(store,repo,monkeypatch):
+    from hub import service as service_module
+    for key,extra,budget,expected in (('gw1',{},8192,400),('gw2',{'model_output':8192},8192,200),('gw3',{'model_output':8192},9000,400),('gw4',{},4096,200)):
+        job=store.submit(JobRequest(role='editor',repo=str(repo),task='Edit',allowed_paths=['app.ts'],idempotency_key=key,**extra));store.next()
+        class Upstream:
+            status_code=200
+            async def aiter_lines(self):
+                yield json.dumps({'message':{'content':'x'},'done':True,'done_reason':'stop','eval_count':1,'prompt_eval_count':1})
+            async def aclose(self):pass
+        class Client:
+            def build_request(self,*a,**k):return None
+            async def send(self,*a,**k):return Upstream()
+            async def aclose(self):pass
+        monkeypatch.setattr(service_module.httpx,'AsyncClient',lambda *a,**k:Client())
+        headers={'Authorization':'Bearer '+initialize()}
+        with TestClient(create_app(store,start_workers=False),base_url='http://127.0.0.1:8765') as c:
+            response=c.post(f"/inference/{job['id']}/chat",json={'model':model_name('gemma'),'stream':True,'messages':[],'options':{'num_ctx':16384,'num_predict':budget}},headers=headers)
+        assert response.status_code==expected,(key,response.status_code)

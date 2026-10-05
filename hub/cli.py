@@ -92,6 +92,17 @@ def main():
             value=seed_profiles()
         else:value=call('GET','/api/project-profile?'+urlencode({'repo':args.repo}))
         print(json.dumps(value,indent=2));return
+    if command=='incident':
+        p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('job_id');p.add_argument('--out');p.add_argument('--include-notes',action='store_true',help='Include the review notes (written by you; check them for private text first)')
+        args=p.parse_args()
+        from .mcp_adapter import job_path
+        from . import incident
+        from .settings import STATE
+        job=call('GET',job_path(args.job_id))
+        text=json.dumps(incident.build(job,STATE/'jobs'/job['id'],args.include_notes),indent=2)
+        if args.out:Path(args.out).write_text(text+'\n');print('Wrote '+args.out)
+        else:print(text)
+        return
     if command=='artifact':
         p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('job_id');p.add_argument('artifact');p.add_argument('--offset',type=int,default=0);p.add_argument('--limit',type=int,default=4000)
         args=p.parse_args()
@@ -107,15 +118,18 @@ def main():
         args=p.parse_args()
         from .mcp_adapter import job_path
         print(json.dumps(call('POST',job_path(args.job_id)+'/summarize',{'idempotency_key':args.idempotency_key,'timeout':args.timeout,'caller':'cli'}),indent=2));return
-    if command in ('apply','discard'):
+    if command in ('apply','discard','revert'):
         p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('job_id')
+        if command=='apply':
+            p.add_argument('--accept-removals',action='store_true');p.add_argument('--revalidate',action='store_true');p.add_argument('--run-checks',action='store_true')
         args=p.parse_args()
         from .mcp_adapter import job_path
-        try:print(json.dumps(call('POST',job_path(args.job_id)+'/'+command),indent=2))
+        body={'accept_removals':args.accept_removals,'revalidate':args.revalidate,'run_checks':args.run_checks} if command=='apply' else None
+        try:print(json.dumps(call('POST',job_path(args.job_id)+'/'+command,body),indent=2))
         except Exception as e:print(str(e),file=sys.stderr);sys.exit(2)
         return
     if command in ('status','result','cancel','review','wait'):
-        p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('job_id');p.add_argument('decision',nargs='?');p.add_argument('--notes',default='')
+        p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('job_id');p.add_argument('decision',nargs='?');p.add_argument('--notes',default='');p.add_argument('--reason',choices=['truncated','wrong_edit','oversized','no_change','check_failed','scope','other'])
         p.add_argument('--full',action='store_true');p.add_argument('--measurement-source',choices=['measured','manual_estimate'],default='measured')
         p.add_argument('--timeout-seconds',type=int,default=25)
         p.add_argument('--task-outcome',choices=['completed','partial','blocked'])
@@ -127,7 +141,7 @@ def main():
                 'cancel':'/cancel','review':'/review','wait':'/wait?'+urlencode({'timeout_seconds':args.timeout_seconds})}[command]
         if command=='review':
             from .models import Review
-            data=Review(decision=args.decision,notes=args.notes,measurement_source=args.measurement_source,
+            data=Review(decision=args.decision,notes=args.notes,reason=args.reason,measurement_source=args.measurement_source,
                        task_outcome=args.task_outcome,review_effort_seconds=args.review_effort_seconds,
                        **{n:getattr(args,n) for n in ('baseline_frontier_tokens','delegated_frontier_tokens','baseline_frontier_cost','delegated_frontier_cost')}).model_dump()
         else:data=None
@@ -203,7 +217,7 @@ def main():
     p.add_argument('--failure-policy',choices=['fail_fast','continue_independent'],default='fail_fast')
     p.add_argument('--profile-hash');p.add_argument('--check-group',action='append',default=[])
     p.add_argument('--profile-ref');p.add_argument('--workflow',choices=['single','implement'],default='single')
-    p.add_argument('--repair-attempts',type=int,default=0);p.add_argument('--investigate-first',action='store_true');p.add_argument('--in-place',action='store_true',help='Edit the repository directly instead of a private workspace');p.add_argument('--kind',choices=['find_code','explain','config_use','compare','check_requirement','mechanical','guard','regression_test','run_tests','fix_test'],help='Delegation shape: checks the role and tunes defaults')
+    p.add_argument('--repair-attempts',type=int,default=0);p.add_argument('--investigate-first',action='store_true');p.add_argument('--in-place',action='store_true',help='Edit the repository directly instead of a private workspace');p.add_argument('--no-gate',action='store_true',help='Skip the complexity gate that refuses oversized Editor tasks');p.add_argument('--auto-split',action='store_true',help='Run the gate\'s proposed units one after another inside the job instead of refusing');p.add_argument('--no-continuation',action='store_true');p.add_argument('--continue-from',help='Job id of an earlier Editor job whose private workspace this job continues');p.add_argument('--model-output',type=int,choices=[4096,8192]);p.add_argument('--edit-format',choices=['text','json']);p.add_argument('--match-mode',choices=['substring','word','line']);p.add_argument('--kind',choices=['find_code','explain','config_use','compare','check_requirement','mechanical','guard','regression_test','run_tests','fix_test'],help='Delegation shape: checks the role and tunes defaults')
     p.add_argument('--model',help='Local model alias from the registry for every phase of this job (default: roles.json)')
     p.add_argument('--model-context',type=int,choices=[16384,32768]);p.add_argument('--model-thinking',choices=['on','off'])
     p.add_argument('--board',action='store_true',help='Rarely useful: deliberate with an anonymous multi-model board before answering (public web roles; 300s budget, slower)')
@@ -233,7 +247,7 @@ def main():
             timeout=args.timeout if args.timeout is not None else default_timeout(role,preset,args.board,args.verify,bool(args.review_pass)),no_recovery=args.no_recovery,caller=args.caller,caller_session=args.caller_session,
             idempotency_key=args.idempotency_key or uuid.uuid4().hex,summary_mode=args.summary_mode,failure_policy=args.failure_policy,
             profile_hash=args.profile_hash,profile_ref=args.profile_ref,check_groups=args.check_group,parameters=parameters,
-            workflow=args.workflow,repair_attempts=args.repair_attempts,investigate_first=args.investigate_first,in_place=args.in_place,kind=args.kind,
+            workflow=args.workflow,repair_attempts=args.repair_attempts,investigate_first=args.investigate_first,in_place=args.in_place,skip_gate=args.no_gate,auto_split=args.auto_split,workspace_from=args.continue_from,continuation=not args.no_continuation,model_output=args.model_output,edit_format=args.edit_format or 'text',match_mode=args.match_mode or 'substring',kind=args.kind,
             model=args.model,model_context=args.model_context,model_thinking=None if args.model_thinking is None else args.model_thinking=='on',
             execution_preset=preset,review_pass=args.review_pass,read_paths=args.read_path,evidence_job_ids=args.evidence_job,handoff_id=args.handoff_id,board=args.board,board_mode=args.board_mode,verify=args.verify,agent_loop=args.agent_loop)
     except Exception as e:p.error(str(e))

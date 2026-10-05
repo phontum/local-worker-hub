@@ -26,6 +26,12 @@ from .presentation import result_summary, result_brief, progress_summary, histor
 from .profiles import show_profile, expand_profile
 
 
+class ApplyOptions(BaseModel):
+    accept_removals: bool = False
+    revalidate: bool = False
+    run_checks: bool = False
+
+
 class AnalysisRequest(BaseModel):
     idempotency_key: str = Field(min_length=1,max_length=200)
     timeout: int = Field(default=120,ge=1,le=1800)
@@ -33,7 +39,7 @@ class AnalysisRequest(BaseModel):
 
 
 def artifact_path(ident, name):
-    allowed={'ask.json','report.txt','draft-report.txt','answer-review.json','work.web-verification.json','answer-review.web-verification.json','work.research-plan.json','answer-review.research-plan.json','scoped-diff.txt','patch.diff','before-status.txt','after-status.txt','before-diff.txt','after-diff.txt','before-staged.txt','after-staged.txt'}
+    allowed={'ask.json','report.txt','draft-report.txt','answer-review.json','work.web-verification.json','answer-review.web-verification.json','work.research-plan.json','answer-review.research-plan.json','scoped-diff.txt','patch.diff','job.diff','staged.diff','before-status.txt','after-status.txt','before-diff.txt','after-diff.txt','before-staged.txt','after-staged.txt'}
     if name not in allowed and not re.fullmatch(r'check-(?:\d+-)?\d+\.log',name) and not re.fullmatch(r'board-[a-z0-9.-]+\.(?:json|txt)',name):
         raise HTTPException(403,'Only reports, diffs and check outputs are exposed')
     path=STATE/'jobs'/ident/name
@@ -157,6 +163,8 @@ def create_app(store=None, start_workers=True):
 
     @app.post('/api/jobs',dependencies=[Depends(auth)])
     def submit(request:JobRequest):
+        if request.in_place and request.caller=='mcp':
+            raise HTTPException(403,'in_place is not available to MCP callers: Editor jobs run in a private workspace and change your tree only through apply_result. Humans can use local-worker --in-place.')
         try:
             if request.source_job_id:raise ValueError('Use the saved-result analysis endpoint')
             for ident in request.evidence_job_ids:
@@ -250,13 +258,22 @@ def create_app(store=None, start_workers=True):
         except ValueError as e:raise HTTPException(409,str(e))
 
     @app.post('/api/jobs/{ident}/apply',dependencies=[Depends(auth)])
-    def apply_result(ident:str):
-        record=job(ident)
+    def apply_result(ident:str,options:ApplyOptions|None=None):
+        record=job(ident);options=options or ApplyOptions()
         if record['request']['role']!='editor' or record['state'] in ('queued','running'):raise HTTPException(409,'Apply needs a finished Editor job')
-        try:value=workspace.apply(ident)
+        try:value=workspace.apply(ident,options.accept_removals,options.revalidate,options.run_checks)
         except workspace.WorkspaceError as e:raise HTTPException(409,str(e))
         except ScopeError as e:raise HTTPException(403,str(e))
-        store.event(ident,'workspace-'+value['state'],{k:value[k] for k in ('applied','conflicts')})
+        store.event(ident,'workspace-'+value['state'],{k:value.get(k) for k in ('applied','conflicts')})
+        return value
+
+    @app.post('/api/jobs/{ident}/revert',dependencies=[Depends(auth)])
+    def revert_result(ident:str):
+        record=job(ident)
+        if record['request']['role']!='editor' or record['state'] in ('queued','running'):raise HTTPException(409,'Revert needs a finished Editor job')
+        try:value=workspace.revert(ident)
+        except workspace.WorkspaceError as e:raise HTTPException(409,str(e))
+        store.event(ident,'workspace-'+value['state'],{k:value.get(k) for k in ('reverted','conflicts')})
         return value
 
     @app.post('/api/jobs/{ident}/discard',dependencies=[Depends(auth)])
@@ -364,7 +381,8 @@ def create_app(store=None, start_workers=True):
         if body.get('model') not in allowed_names():
             raise HTTPException(403,'Only bounded local inference is allowed')
         options=body.get('options') or {}
-        if options.get('num_ctx') not in (16384,32768) or not 1<=options.get('num_predict',0)<=4096:
+        cap=8192 if current['request'].get('model_output')==8192 else 4096  # 8192 only when the job asked for it explicitly
+        if options.get('num_ctx') not in (16384,32768) or not 1<=options.get('num_predict',0)<=cap:
             raise HTTPException(400,'Unsupported context or output budget')
         relieved=await relieve_memory()
         if relieved:store.event(ident,'memory-guard',relieved)

@@ -34,7 +34,7 @@ scoped MCP tools to the model. Do not substitute the permissive legacy agent.
 
 ## What to delegate
 
-Delegate these constantly, with exact scope: "find all code involved in X" and "where is this config used"
+Prefer the MCP tools investigate_code, implement_change, fix_failing_test, add_regression_test and run_checks: they set the safe defaults. Delegate these constantly, with exact scope: "find all code involved in X" and "where is this config used"
 (Investigator: deterministic code index, host-verified path:line evidence); "read these files and explain how X
 works", "compare implementation A and B" and "check whether requirement R is implemented" (Investigator; a COMPLETE
 report needs at least one host-verified reference, unverified ones are listed under Risks); "make this mechanical
@@ -42,7 +42,10 @@ change in these files", "add this specified guard", "add a regression test for t
 failing test" (Editor; use --workflow implement with the failing test as the check for a fix); "run these tests and
 summarize failures" (Validator: zero tokens, failures parsed into test, file:line and assertion). The Editor works in a
 private copy of the repository: read the acceptance packet and patch.diff, then apply_result (it refuses if you
-changed those files meanwhile) or discard_result. Pass kind (find_code, explain, config_use, compare, check_requirement,
+changed those files meanwhile) or discard_result. A reply cut off by the output limit applies nothing and the report says so: split
+the task (one file or one concern per job; for a file over 400 lines name the exact strings to change). A long task still runs: a reply cut off by the output limit is continued, and nothing is
+written until all of it is done. Keep jobs small anyway; for a big one, run bounded jobs with implement_change continue_from so one apply writes them all. apply_result can revalidate the job's checks first, list stale_dependencies and be undone with revert_result. record_review needs notes
+saying what went wrong for rejected/takeover, plus a reason code. Pass kind (find_code, explain, config_use, compare, check_requirement,
 mechanical, guard, regression_test, run_tests, fix_test) to tune defaults; regression_test verifies the new test fails on the
 current code. Architecture, ambiguous root causes and acceptance stay with you.
 
@@ -101,7 +104,7 @@ its private key is configured. A short per-job cooldown spans both passes;
 failure messages never become search results. The default provider is unchanged.
 LangSearch full page text is reused in cached mode; hosted fallback uses free keyless Exa.
 Editor (--write or --role editor): exact authorized file paths; no shell. It edits a private workspace
-(your tree is untouched until apply_result; --in-place / in_place edits directly) and returns a patch plus an
+(your tree is untouched until apply_result; --in-place is a human CLI option and is refused over MCP) and returns a patch plus an
 acceptance packet (diff stats, scope, parsed check failures, review focus). For a specified feature slice, --workflow implement --repair-attempts 1 performs
 scoped edit and supplied checks, with one targeted repair after a failed check.
 --investigate-first adds bounded discovery. The frontier still verifies the diff

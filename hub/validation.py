@@ -1,6 +1,10 @@
 """Recorded command evidence, independent of model availability."""
 import json
+import os
 import re
+import subprocess
+import time
+from pathlib import Path
 from .report import parse_report
 from .testparse import parse as parse_output
 
@@ -88,3 +92,30 @@ def analysis_evidence(checks, budget=12000):
             # Parsed failures say what broke; keep only a short raw tail beside them.
             text += '\n'+c['name']+(' parsed failures:\n'+'\n'.join(parsed)+'\n' if parsed else '')+' recorded log excerpt:\n'+c.get('output_tail','')[-(1500 if parsed else 3000):]
     return text[:budget] + '\n[Evidence excerpt is bounded; saved logs are authoritative. Omitted logs were not inspected.]'
+
+
+def run_check_sync(check, root, cap=120):
+    """Run one approved check synchronously in `root` (used when a finished job's checks are re-run, which the job runner is not involved in).
+    Same argv, working-directory boundary and environment rules as the job runner; checks that need its extra machinery are reported as blocked."""
+    result = {'name': check.name, 'exit_code': None, 'timed_out': False, 'status': 'blocked', 'seconds': 0, 'output_tail': '', 'counts': None, 'failures': []}
+    root = Path(root).resolve()
+    cwd = (root / check.cwd).resolve()
+    if not cwd.is_dir() or not (cwd == root or root in cwd.parents):
+        return result | {'reason': 'Check cwd is not a directory inside the repository'}
+    if check.depends_on or check.requires_test_database or check.guard_next_dev or check.required_env:
+        return result | {'reason': 'This check needs the job runner (dependencies, test database, dev-server guard or required environment); run it yourself'}
+    env = {k: v for k, v in os.environ.items() if k in ('PATH', 'HOME', 'USER', 'LANG', 'LC_ALL') or k in check.env_allowlist}
+    env.update(check.environment)
+    env.setdefault('PYTHONDONTWRITEBYTECODE', '1')
+    started = time.monotonic()
+    try:
+        done = subprocess.run(check.argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=min(check.timeout, cap))
+        output = (done.stdout + done.stderr).decode('utf-8', errors='replace')[-10000:]
+        counts, failures = parsed_output(output, check.argv, str(cwd))
+        result.update(exit_code=done.returncode, status='passed' if done.returncode == 0 else 'failed', output_tail=output, counts=counts, failures=failures if done.returncode else [])
+    except subprocess.TimeoutExpired:
+        result.update(timed_out=True, status='failed', reason=f'Timed out after {min(check.timeout, cap)}s')
+    except OSError as error:
+        result.update(reason=str(error)[:300])
+    result['seconds'] = round(time.monotonic() - started, 2)
+    return result

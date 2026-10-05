@@ -79,6 +79,9 @@ def request_for(case, repo, args):
         kwargs['checks'] = [{'name': c['name'], 'argv': sub(c['argv'])} for c in case['checks']]
     if case.get('repair_attempts'):
         kwargs['repair_attempts'] = case['repair_attempts']
+    for pair in getattr(args, 'request', None) or []:  # experiment options, e.g. match_mode=line; checked afterwards against the job's own records
+        key, _, value = pair.partition('=')
+        kwargs[key] = json.loads(value) if value[:1] in '0123456789tfn[{"' else value
     return JobRequest(**kwargs)
 
 def changed_files(repo):
@@ -267,6 +270,7 @@ def main():
     parser.add_argument('--model', help='Registered model alias sent with every request (default: the hub default)')
     parser.add_argument('--thinking', choices=['on', 'off'])
     parser.add_argument('--no-kind', action='store_true', help='Do not send the job kind (earlier runs did not)')
+    parser.add_argument('--request', action='append', metavar='KEY=VALUE', help='Extra request field (repeatable), e.g. match_mode=line or edit_format=json')
     parser.add_argument('--repeat', type=int, default=3)
     parser.add_argument('--shape', nargs='+')
     parser.add_argument('--id', nargs='+')

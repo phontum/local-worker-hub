@@ -28,6 +28,8 @@ files. After two unsuccessful local attempts, take over.
 - `hub/runner.py`, `hub/engine.py`: role workflows and bounded model execution.
 - `hub/codeindex.py`, `hub/workspace.py`, `hub/acceptance.py`, `hub/testparse.py`: deterministic code index and candidate ranking,
   private editor workspace with guarded apply, the acceptance packet, and parsing of test/lint output into failures.
+- `hub/textedit.py`, `hub/jsonedit.py`, `hub/contextpack.py`, `hub/editgate.py`, `hub/mappings.py`, `hub/incident.py`: strict transactional edit protocol (continuation after a cut-off reply, line-anchored
+  matching, an experimental JSON format), context packing for the edit prompt, the advisory complexity gate with proposed split, post-edit `old -> new` verification, and metadata-only incident export.
 - `hub/scoped.py`, `hub/evidence.py`: scoped tools and freshness/provenance checks.
 - `hub/public_page.py`, `hub/web_provider.py`, `hub/web_verification.py`: public
   retrieval, search-provider adapters and current-source verification.
@@ -57,6 +59,9 @@ files. After two unsuccessful local attempts, take over.
 - Investigator reads are scoped, and its `path:line` references are verified by the host against lines it read. Editor writes require exact
   authorized paths and fresh observed source, and land in a private workspace; only `apply_result` writes the user's tree, and only if the
   authorized files are unchanged there. Preserve symlink, hardlink and secret-file guards.
+- Editor replies are applied transactionally: strict parse, zero edits from a truncated or malformed reply, all-or-nothing commit, a guard against destructive
+  replacements, and reports built from the actual diff. `in_place` is a human CLI option, never available over MCP. Keep these properties when changing `hub/textedit.py`,
+  `hub/pipelines.py` (`run_edit`) or the runner's report assembly; `tests/test_edit_incidents.py` replays the real failures.
 - Validator executes only explicitly approved argv checks. It uses zero model
   tokens by default. Approved programs are trusted execution, not an OS sandbox;
   never disguise installs, migrations, deployment or destructive work as checks.

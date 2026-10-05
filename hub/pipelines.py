@@ -1,5 +1,6 @@
 """Host-driven coding pipelines: investigate (map -> choose ranges -> read -> answer) and edit (show files ->
 text edit blocks -> apply through ScopedFiles -> one corrective turn). No tool calling."""
+import difflib
 import json
 import re
 import time
@@ -7,6 +8,8 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 from .calls import Caller, load_profiles, write_session
 from .codeindex import CodeIndex, format_candidates, mentioned_text, select_ranges
+from . import contextpack, editgate, jsonedit, mappings
+from .phases import resolve_phase
 from .localize import identifiers, read_ranges, repo_map, search_hits
 from .models import JobRequest
 from .preferences import prompt_lines
@@ -16,7 +19,6 @@ from . import textedit
 
 PROFILES = {'localize': {'thinking': False, 'output': 600, 'temperature': 0.0},
             'investigate-answer': {'thinking': False, 'output': 2048, 'temperature': 0.2}}
-SHOW_WHOLE = 400
 
 class Range(BaseModel):
     model_config = ConfigDict(extra='forbid')
@@ -50,8 +52,8 @@ ANSWER = ('Answer the question from the file excerpts. Put every supporting loca
           'Say plainly what you could not find. Set complete=false when any requirement or part of the question is unknown or unverified, or when other ranges are needed (list them in more); '
           'otherwise complete=true and more empty.')
 HOST_BUDGET = 26000
-EDIT = ('You are a careful code editor. Make exactly the change the task asks for in the listed files, preserving unrelated code and '
-        'behaviour. ' + textedit.FORMAT.format(limit=textedit.WHOLE_LIMIT))
+EDIT_BASE = 'You are a careful code editor. Make exactly the change the task asks for in the listed files, preserving unrelated code and behaviour. '
+EDIT = EDIT_BASE + textedit.format_for()
 
 def audit_writer(directory, phase):
     def audit(kind, data):
@@ -131,7 +133,8 @@ async def run_investigate(directory, label, prompt, phase='work'):
                 excerpts += '\n\n' + more
                 finding = await caller.json('investigate-answer', 2, ANSWER + '\n' + prompt_lines(), prompt + '\n\nFile excerpts:\n' + excerpts, Finding) or finding
         if not finding or not finding.answer.strip():
-            content = envelope('PARTIAL', 'No usable answer was produced.', risks='The local model returned no answer.')
+            cut = '; '.join(sorted({g.cut_off_message for g in caller.truncations}))
+            content = envelope('PARTIAL', 'No usable answer was produced.' + (' The model output was cut off.' if cut else ''), risks=cut or 'The local model returned no answer.')
         else:
             good, bad = verified_refs(files, finding.refs, finding.answer)
             evidence = ('\n\nEvidence (host-verified against lines read):\n' + '\n'.join(f'- {p}:{n} — {note}' for p, n, note in good)) if good else ''
@@ -146,30 +149,58 @@ async def run_investigate(directory, label, prompt, phase='work'):
                                risks='; '.join(risks) if risks else 'None identified.')
         write_session(directory, label, caller, prompt, content)
 
-def file_blocks(snapshots, task):
-    out = []
-    for path, (relative, content, digest) in snapshots.items():
-        if content is None:
-            out.append(f'===== {path} (new file, does not exist yet) =====')
+def read_references(files, request):
+    """Read-only context the frontier named in read_paths that the job may not edit; unreadable or oversized ones are skipped."""
+    allowed, out = set(request.allowed_paths), []
+    for path in request.read_paths:
+        if path in allowed:
             continue
-        rows = content.split('\n')
-        if len(rows) <= SHOW_WHOLE:
-            out.append(f'===== {path} ({len(rows)} lines) =====\n{content}\n===== end of {path} =====')
+        try:
+            relative, content, digest = textedit.snapshot(files, path)
+        except (ScopeError, OSError, UnicodeError, ValueError):
             continue
-        # Large file: show the regions around identifiers named in the task, plus the top of the file.
-        keep = set(range(0, 30))
-        for name in identifiers(task):
-            for i, row in enumerate(rows):
-                if name in row:
-                    keep.update(range(max(0, i - 40), min(len(rows), i + 41)))
-        parts, previous = [], -2
-        for i in sorted(keep):
-            if i != previous + 1:
-                parts.append(f'... (lines {i + 1}+)')
-            parts.append(rows[i])
-            previous = i
-        out.append(f'===== {path} ({len(rows)} lines; only parts shown, SEARCH must use shown lines) =====\n' + '\n'.join(parts) + f'\n===== end of {path} =====')
-    return '\n\n'.join(out)
+        if content is not None and len(content) <= 100_000:
+            out.append((relative, content, digest))
+    return out
+
+def staged_diff(snapshots, contents):
+    pieces = []
+    for path, new in contents.items():
+        before = snapshots[path][1] or ''
+        text = '' if new is textedit.DELETED else new
+        pieces.extend(difflib.unified_diff(before.splitlines(keepends=True), text.splitlines(keepends=True), fromfile='before/' + path, tofile='after/' + path))
+    return ''.join(pieces)
+
+MAX_CONTINUATIONS = 5
+MAX_UNITS = 12
+CONTINUE = ('\n\nYour previous reply was cut off by the output limit after {blocks} complete edit block(s). Those edits are already applied in the content below. '
+            'Continue with only the changes that are still missing; do not repeat, undo or re-emit edits that are already there. '
+            'If every requested change is already in the content, reply with END OF EDITS only.\n\nCurrent content:\n')
+
+def continue_text(blocks, fmt):
+    text = CONTINUE.format(blocks=blocks)
+    return text.replace('reply with END OF EDITS only', 'reply with an empty edits list') if fmt == 'json' else text
+
+def parse_reply(gen, fmt):
+    return jsonedit.parse(gen.text) if fmt == 'json' else textedit.parse(gen.text, require_sentinel=gen.done_reason is None)
+
+def evaluate(gen, view, allow_shrink=False, deletable=(), allow_empty=False, mode='substring', fmt='text', lenient=False):
+    """One complete reply planned in memory against `view`: (Plan, model summary). A cut-off or malformed reply plans nothing."""
+    if gen.truncated:
+        return textedit.Plan({}, [gen.cut_off_message], {}), ''
+    parsed = parse_reply(gen, fmt)
+    if parsed.problems:
+        return textedit.Plan({}, parsed.problems, {}), parsed.summary
+    if not parsed.edits:
+        return (textedit.Plan({}, [], {}) if allow_empty else textedit.Plan({}, ['No edit blocks were found in the reply'], {})), parsed.summary
+    return textedit.plan(parsed.edits, view, allow_shrink, deletable, mode, lenient), parsed.summary
+
+def salvage(gen, view, deletable=(), mode='substring', fmt='text', lenient=False):
+    """The complete blocks of a reply that was cut off, planned in memory: (Plan, number of complete blocks). The cut-off block is dropped."""
+    edits = jsonedit.salvage(gen.text) if fmt == 'json' else textedit.parse(gen.text).edits  # text parsing stops at the first unterminated block
+    if not edits:
+        return textedit.Plan({}, [], {}), 0
+    return textedit.plan(edits, view, False, deletable, mode, lenient), len(edits)
 
 async def run_edit(directory, label, prompt, phase='work'):
     request = JobRequest.model_validate_json((directory / 'request.json').read_text())
@@ -183,20 +214,122 @@ async def run_edit(directory, label, prompt, phase='work'):
         # Thinking only on explicit request: with thinking the model spent the whole output budget reasoning and
         # wrote no edit blocks (role profiles default editor thinking to on for the older tool loop).
         thinking = bool(request.model_thinking)
-        reply = await caller.text(phase if phase in ('edit',) else 'work', 0, EDIT, prompt + '\n\nAuthorized files:\n' + file_blocks(snapshots, request.task), thinking)
-        edits = textedit.parse(reply)
-        changed, errors = textedit.apply_all(files, edits, snapshots) if edits else ([], ['No edit blocks were found in the reply'])
-        if errors:
-            # One corrective turn with the exact failures and the files as they are now.
-            failed = {e.split(':', 1)[0] for e in errors}
-            fresh = {r[0]: r for r in (textedit.snapshot(files, p) for p in request.allowed_paths) if r[0] in failed or not edits}
-            reply2 = await caller.text(phase if phase in ('edit',) else 'work', 1, EDIT, prompt + '\n\nYour previous edit blocks could not be applied:\n- ' +
-                                       '\n- '.join(errors) + '\n\nReply with corrected blocks for these files only. Current content:\n' + file_blocks(fresh or snapshots, request.task), thinking)
-            edits2 = textedit.parse(reply2)
-            more, errors = textedit.apply_all(files, edits2, fresh or snapshots) if edits2 else ([], ['No edit blocks were found in the corrected reply'])
-            changed += [p for p in more if p not in changed]
-            reply = reply2 if edits2 else reply
-        note = textedit.summary(reply) or ('Edited ' + ', '.join(changed) if changed else 'No change was applied.')
+        name = phase if phase in ('edit',) else 'work'
+        system = EDIT_BASE + (jsonedit.format_for(request.delete_paths) if request.edit_format == 'json' else textedit.format_for(request.delete_paths))
+        deletable = frozenset(request.delete_paths)
+        decision = editgate.decide(request.task, snapshots)
+        units = None
+        if decision['tripped'] and not request.skip_gate:
+            if request.auto_split and len(decision['units']) <= MAX_UNITS:
+                units, decision['mode'] = decision['units'], 'auto_split'
+            elif request.refuse_oversized or request.auto_split:
+                decision['mode'] = 'refused'
+            else:
+                decision['mode'] = 'advised'  # a cut-off reply is continued, so the job runs; the decision is recorded for calibration
+        (directory / (label + '.gate.json')).write_text(json.dumps(decision))
+        (directory / (label + '.gate.json')).chmod(0o600)
+        if decision.get('mode') == 'refused':
+            write_session(directory, label, caller, prompt, envelope('BLOCKED', editgate.message(decision), risks='Too large for one generation; resubmit the proposed units as separate jobs'))
+            return
+        spec, _ = resolve_phase(request, caller.profiles, name)
+        references = read_references(files, request)
+        packed = contextpack.pack(snapshots, request.task, contextpack.budget_chars(spec.context, spec.output_limit, len(system) + len(prompt) + 400), references)
+        (directory / (label + '.context.json')).write_text(json.dumps(packed.report))
+        (directory / (label + '.context.json')).chmod(0o600)
+        pairs = mappings.extract(request.task)
+        if len(pairs) >= 2 and len(packed.report['coverage']['missing_mappings']) == len(pairs):
+            reason = f"None of the {len(pairs)} `old -> new` texts in the task exist in the authorized files ({', '.join(sorted(snapshots))}); the authorized paths are probably wrong"
+            write_session(directory, label, caller, prompt, envelope('BLOCKED', reason + '. No model call was made.', risks=reason))
+            return
+
+        work, staged, turns, state = dict(snapshots), {}, [], {'step': 0, 'hint': '', 'continuations': 0, 'unit_log': []}
+        def stage(contents):
+            for path, new in contents.items():
+                staged[path] = new
+                work[path] = (snapshots[path][0], '' if new is textedit.DELETED else new, snapshots[path][2])
+        def flush(errors, changed=()):
+            (directory / (label + '.turns.json')).write_text(json.dumps({'turns': turns, 'changed': list(changed), 'errors': errors[:8], 'staged_not_applied': sorted(staged) if errors else [],
+                                                                         'continuations': state['continuations'], 'units': state['unit_log']}))
+            (directory / (label + '.turns.json')).chmod(0o600)
+            if staged and errors:
+                (directory / 'staged.diff').write_text(staged_diff(snapshots, staged))
+                (directory / 'staged.diff').chmod(0o600)
+        def log(gen, planned, unit, continuation=False, blocks=None):
+            turns.append({'step': state['step'], 'unit': unit, 'done_reason': gen.done_reason, 'output_tokens': gen.output_tokens, 'limit': gen.limit, 'truncated': gen.truncated,
+                          'continuation': continuation, 'blocks': blocks, 'errors': planned.errors[:8], 'planned_files': sorted(planned.contents), 'format': request.edit_format, 'match': planned.stats or {}})
+        async def generate(text):
+            gen = await caller.generate(name, state['step'], system, text, thinking, jsonedit.JsonReply if request.edit_format == 'json' else None)
+            state['step'] += 1
+            return gen
+        def pack_for(view, unit_task, header):
+            budget = contextpack.budget_chars(spec.context, spec.output_limit, len(system) + len(header) + 400)
+            return contextpack.pack(view, unit_task, budget, references)
+
+        async def run_unit(unit_task, scope, unit_prompt, index):
+            """One bounded task over `scope`: generate, continue after a cut-off reply, one corrective turn. Clean results are staged; returns errors."""
+            view = {p: work[p] for p in scope}
+            cover = pack_for(view, unit_task, unit_prompt)
+            missing = cover.report['coverage']['missing_mappings']
+            notes = ('\n\nNote: the host could not find these texts in the authorized files: ' + '; '.join(f"'{t}'" for t in missing[:6]) +
+                     '. Do not invent SEARCH text for them; they may belong to other files.') if missing else ''
+            gen = await generate(unit_prompt + '\n\nAuthorized files:\n' + cover.text + notes)
+            corrected, continuations = False, 0
+            while True:
+                view = {p: work[p] for p in scope}
+                if gen.truncated:
+                    if not request.continuation:
+                        planned = textedit.Plan({}, [gen.cut_off_message], {})
+                        log(gen, planned, index)
+                        return planned.errors
+                    planned, blocks = salvage(gen, view, deletable, request.match_mode, request.edit_format, units is not None)
+                    log(gen, planned, index, continuation=continuations > 0, blocks=blocks)
+                    if planned.errors:
+                        stage(planned.contents)
+                        return planned.errors
+                    if not planned.contents:
+                        return [gen.cut_off_message + '; no complete edit block came before the cut, so there is nothing to continue from']
+                    stage(planned.contents)
+                    continuations += 1
+                    state['continuations'] += 1
+                    flush([])
+                    if continuations > MAX_CONTINUATIONS:
+                        return [f'The model was still cut off after {MAX_CONTINUATIONS} continuation turns; split the task']
+                    redo = pack_for({p: work[p] for p in scope}, unit_task, unit_prompt)
+                    gen = await generate(unit_prompt + continue_text(blocks, request.edit_format) + redo.text)
+                    continue
+                planned, hint = evaluate(gen, view, deletable=deletable, allow_empty=continuations > 0 or units is not None, mode=request.match_mode, fmt=request.edit_format, lenient=units is not None)
+                log(gen, planned, index, continuation=continuations > 0, blocks=len(planned.contents))
+                state['hint'] = hint or state['hint']
+                stage(planned.contents)
+                if not planned.errors or corrected:
+                    return planned.errors
+                corrected = True
+                failing = {e.split(':', 1)[0] for e in planned.errors} & set(scope)
+                fresh = {p: work[p] for p in (failing or scope)}
+                correction = unit_prompt + '\n\nYour previous edit blocks could not be applied (nothing was written):\n- ' + '\n- '.join(planned.errors) + '\n\nReply with corrected blocks for these files only. Current content:\n'
+                gen = await generate(correction + pack_for(fresh, unit_task, correction).text)
+
+        errors = []
+        if units is None:
+            errors = await run_unit(request.task, list(snapshots), prompt, 0)
+            state['unit_log'].append({'index': 0, 'files': list(snapshots), 'ok': not errors})
+        else:
+            for index, unit in enumerate(units, 1):
+                shown = unit['task'] + '\n\nFor context, this is part of a larger task (do only your part above, not the rest): ' + request.task
+                unit_errors = await run_unit(unit['task'], unit['allowed_paths'], prompt.replace(request.task, shown, 1), index)
+                state['unit_log'].append({'index': index, 'files': unit['allowed_paths'], 'ok': not unit_errors})
+                if unit_errors:
+                    errors = [f'unit {index} of {len(units)} ({unit["allowed_paths"][0]}): ' + e for e in unit_errors]
+                    break
+        changed = []
+        if staged and not errors:
+            changed, errors = textedit.commit(files, staged, snapshots)
+        flush(errors, changed)
+        extra = (f' after {state["continuations"]} continuation turn(s)' if state['continuations'] else '') + (f' in {len(units)} units' if units else '')
+        if changed:
+            note = f'Applied {len(changed)} file(s){extra}: ' + ', '.join(changed) + '.' + (f' Model summary: {state["hint"]}' if state['hint'] and not units else '')
+        else:
+            note = 'No edits were applied' + (f' ({errors[0]})' if errors else '') + '.' + (' Edits that planned cleanly for ' + ', '.join(sorted(staged)) + ' were not written; see staged.diff.' if staged and errors else '')
         status = 'COMPLETE' if changed and not errors else 'PARTIAL'
         content = envelope(status, note, files='\n'.join(changed) or 'None', risks='; '.join(errors) or 'None identified.')
         if not parse_report(content):

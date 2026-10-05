@@ -157,6 +157,13 @@ class Store:
             stats['repair_attempts']+=max(0,len((j['result'] or {}).get('attempts',[]))-1)
             for k,v in (j['result'] or {}).get('usage',{}).items():
                 if k in usage: usage[k] += v or 0
+        review_reasons,review_by_kind={},{}
+        for j in jobs:
+            r=j.get('review')
+            if not r:continue
+            row=review_by_kind.setdefault(j['request'].get('kind') or j['request'].get('role','unknown'),{'accepted':0,'rejected':0,'takeover':0})
+            row[r['decision']]=row.get(r['decision'],0)+1
+            if r['decision']!='accepted':review_reasons[r.get('reason') or 'unspecified']=review_reasons.get(r.get('reason') or 'unspecified',0)+1
         context_stats={}
         with self.connect() as db:
             for row in db.execute("SELECT data FROM events WHERE kind='inference'"):
@@ -175,7 +182,7 @@ class Store:
         savings = sum(j['review']['baseline_frontier_tokens']-j['review']['delegated_frontier_tokens'] for j in measured)
         money = [j for j in jobs if j['review'] and j['review'].get('measurement_source','measured')=='measured' and j['review'].get('baseline_frontier_cost') is not None and j['review'].get('delegated_frontier_cost') is not None]
         return {'jobs':len(jobs),'accepted':sum(bool(j['review'] and j['review']['decision']=='accepted') for j in jobs),
-            'role_stats':role_stats,'context_stats':context_stats,'handoff_stats':list(handoffs.values())[:100],
+            'role_stats':role_stats,'review_stats':{'by_kind':review_by_kind,'reasons':review_reasons},'context_stats':context_stats,'handoff_stats':list(handoffs.values())[:100],
             'usage':usage,'pricing':rates,'api_equivalent_usd':equivalent,'matched_baselines':len(measured),
             'manual_estimate_baselines':len(matched)-len(measured),
             'estimated_frontier_tokens_avoided':savings if measured else None,

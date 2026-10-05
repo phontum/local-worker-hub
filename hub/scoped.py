@@ -229,6 +229,19 @@ class ScopedFiles:
         self.audit('edit',{'path':relative,'sha256':digest,'bytes':len(data)})
         return json.dumps({'path':relative,'sha256':digest,'bytes':len(data)})
 
+    def delete_file(self, path, expected_sha256):
+        """Delete an authorized file that the job declared in delete_paths, if it is still exactly what was read."""
+        if self.request.role!='editor': raise ScopeError('Only Editor can edit')
+        target=self.path(path);relative=str(target.relative_to(self.root))
+        if relative not in self.allowed or relative not in set(self.request.delete_paths): raise ScopeError('Deleting this file was not declared in delete_paths')
+        with os.fdopen(self.open_fd(path,os.O_RDWR),'r+b') as f:
+            fcntl.flock(f,fcntl.LOCK_EX)
+            if hashlib.sha256(f.read(2_000_001)).hexdigest()!=expected_sha256:raise ScopeError('File changed since the last read. Nothing deleted.')
+            os.unlink(target)
+        self.observed.pop(relative,None);self.observed_lines.pop(relative,None)
+        self.audit('delete',{'path':relative,'sha256':expected_sha256})
+        return json.dumps({'path':relative,'deleted':True})
+
     def replace_lines(self, path: str, start: int, end: int, content: str) -> str:
         """Replace an inclusive, freshly observed line range; preserve every surrounding line."""
         target=self.path(path);relative=str(target.relative_to(self.root))

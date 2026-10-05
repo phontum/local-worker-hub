@@ -8,13 +8,22 @@ from .validation import failed, failure_lines
 
 DEFINITION = re.compile(r'^\+\s*(?:export\s+)?(?:async\s+)?(?:def|class|function|interface|type|struct|enum|func|fn|pub fn)\s+(\w+)|^\+\s*(?:export\s+)?(?:const|let)\s+(\w+)\s*=\s*(?:async\s*)?(?:\(|function)')
 
+TEST_NAME = re.compile(r"^\+\s*(?:async\s+)?def\s+(test\w*)|^\+\s*(?:it|test)(?:\.\w+)?\(\s*[\'\"`](.+?)[\'\"`]")
+
+def added_tests(patch):
+    """Names of tests defined on added lines of a diff (pytest functions, `it('…')`/`test('…')` titles)."""
+    return {name for line in patch.splitlines() for groups in TEST_NAME.findall(line) for name in groups if name}
+
 def diff_stats(patch):
     """Per-file added and removed line counts from a unified diff."""
     stats, current = {}, None
     for line in patch.splitlines():
         if line.startswith('diff --git '):
             current = line.rsplit(' b/', 1)[-1]
-            stats[current] = {'added': 0, 'removed': 0}
+            stats.setdefault(current, {'added': 0, 'removed': 0})
+        elif line.startswith('+++ ') and line != '+++ /dev/null':  # git's `+++ b/path` and the scoped diff's `+++ after/path`
+            current = re.sub(r'^(?:b|after)/', '', line[4:].strip())
+            stats.setdefault(current, {'added': 0, 'removed': 0})
         elif current and line.startswith('+') and not line.startswith('+++'):
             stats[current]['added'] += 1
         elif current and line.startswith('-') and not line.startswith('---'):
@@ -43,7 +52,34 @@ def review_focus(patch, stats, checks, allowed):
         notes.append('Authorized but unchanged: ' + ', '.join(untouched[:4]))
     return notes[:6]
 
-def build(patch, checks, status, allowed, attempts, workspace_state, outside=None, extra_files=None, remaining=None, regression=None):
+def cumulative(patch, turns):
+    """Host-written Findings and Files from the actual diff, with one line per editor turn; the last turn never stands in for the job."""
+    stats = diff_stats(patch)
+    added, removed = sum(s['added'] for s in stats.values()), sum(s['removed'] for s in stats.values())
+    head = f"Changed {len(stats)} file(s) (+{added} -{removed}): " + ', '.join(stats) if stats else 'No authorized file changed.'
+    lines = [f"- {t['label']} ({t['status']}): " + (t['findings'].strip().splitlines() or [''])[0][:200] for t in turns]
+    files = '\n'.join(f"{path} (+{s['added']} -{s['removed']})" for path, s in stats.items()) or 'None'
+    return head + ('\nTurns:\n' + '\n'.join(lines) if lines else ''), files
+
+def context_summary(reports):
+    """What the model was shown, compactly: per file, how much; named texts not found or not visible; read-only references used."""
+    files = {}
+    for report in reports:
+        for path, info in report.get('files', {}).items():
+            files[path] = {'lines': info['lines'], 'shown': info['shown'], 'whole': info['whole']}
+    return {'files': files, 'missing_mappings': sorted({m for r in reports for m in r.get('coverage', {}).get('missing_mappings', [])})[:6],
+            'hidden_targets': sorted({m for r in reports for m in r.get('coverage', {}).get('hidden', [])})[:6],
+            'references': sorted({(ref['path'], ref['mode']) for r in reports for ref in r.get('references', [])})}
+
+def edit_summary(turn_files):
+    """Counts of generation turns, truncations, rejected replies and destructive-looking blocks from the pipeline's per-turn records."""
+    turns = [t for record in turn_files for t in record.get('turns', [])]
+    errors = [e for t in turns for e in t.get('errors', [])]
+    return {'generations': len(turns), 'truncated': sum(bool(t.get('truncated')) for t in turns), 'rejected_replies': sum(bool(t.get('errors')) for t in turns),
+            'destructive_blocks': sum(any(k in e for k in ('removes existing code', 'would shrink', 'definitions would be removed')) for e in errors),
+            'staged_not_applied': sorted({p for record in turn_files for p in record.get('staged_not_applied', [])})}
+
+def build(patch, checks, status, allowed, attempts, workspace_state, outside=None, extra_files=None, remaining=None, regression=None, edits=None, removed=None, declared_deletions=None, dependencies=None):
     stats = diff_stats(patch)
     outside = outside or []
     failing = [c for c in checks if failed(c)]
@@ -51,7 +87,7 @@ def build(patch, checks, status, allowed, attempts, workspace_state, outside=Non
         # A regression test must fail on the unfixed code: the failing checks are the point, a passing or broken new test is the problem.
         clean = status == 'COMPLETE' and bool(stats) and regression['reproduces_bug'] and not outside
     else:
-        clean = status == 'COMPLETE' and bool(stats) and not failing and not outside and bool(checks)
+        clean = status == 'COMPLETE' and bool(stats) and not failing and not outside and bool(checks) and not [p for p in (removed or []) if p not in (declared_deletions or [])]
     return {
         'status': status,
         'workspace': workspace_state,
@@ -68,5 +104,7 @@ def build(patch, checks, status, allowed, attempts, workspace_state, outside=Non
         'regression': regression,
         'review_focus': (['New test fails as expected on the current code: ' + ', '.join(regression['new_failing'][:4])] if regression and regression['reproduces_bug'] else [])
                        + [n for n in review_focus(patch, stats, [] if regression else checks, allowed) if not (regression and n.startswith('Source changed without'))],
-        'next_action': 'review_patch_then_apply_result' if clean else 'frontier_decision',
+        'edits': edits,
+        'removed_files': removed or [], 'undeclared_removals': [p for p in (removed or []) if p not in (declared_deletions or [])], 'dependencies_tracked': dependencies,
+        'next_action': ('review_changes' if workspace_state == 'in_place' else 'review_patch_then_apply_result') if clean else 'frontier_decision',
     }

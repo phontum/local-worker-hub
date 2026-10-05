@@ -179,3 +179,41 @@ async def test_in_place_opt_out_edits_the_repository_directly(repo,store):
 def test_in_place_is_editor_only(repo):
     with pytest.raises(ValueError):
         JobRequest(role='investigator',repo=str(repo),task='x',idempotency_key='ip',in_place=True)
+
+
+@pytest.mark.asyncio
+async def test_the_final_report_lists_what_really_changed_even_when_the_repair_turn_changed_nothing(repo,store):
+    # Incident shape: the edit turn changed a file, the repair turn applied nothing and reported "No change was applied".
+    (repo/'b.ts').write_text('export const b = 1;\n')
+    check=Check(name='never',argv=[sys.executable,'-c','raise SystemExit(1)'])
+    job=store.submit(JobRequest(role='editor',workflow='implement',repair_attempts=1,repo=str(repo),task='Edit both',allowed_paths=['app.ts','b.ts'],checks=[check],
+                                idempotency_key='cumulative',timeout=60,in_place=True))
+    async def fake_model(_job,_request,_directory,label,prompt,**kwargs):
+        if label=='edit':
+            (Path(_request.repo)/'app.ts').write_text('export const answer = 42;\n')
+            return {'info':{'tokens':{}}},report('PARTIAL','Applied 1 file(s): app.ts.')
+        return {'info':{'tokens':{}}},report('PARTIAL','No edits were applied (b.ts: SEARCH does not match).')
+    runner=Runner(store,'token');runner.execute_model=fake_model
+    await runner.run(store.next());result=store.get(job['id'])['result']
+    assert result['worker_status']=='PARTIAL'
+    text=result['report']
+    assert 'Changed 1 file(s) (+1 -1): app.ts' in text and 'app.ts (+1 -1)' in text
+    assert '- edit (PARTIAL): Applied 1 file(s): app.ts.' in text and '- repair-1 (PARTIAL): No edits were applied' in text
+    assert text.count('No authorized file changed') == 0
+    packet=result['acceptance']
+    assert packet['workspace']=='in_place' and packet['diff']['files']==1 and packet['next_action']=='frontier_decision' and packet['repair_used']
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_cannot_finish_in_the_remaining_time_is_skipped_not_cut_off(repo,store):
+    job=store.submit(implement_request(repo,key='budget',execution_preset='work',repair_attempts=1));calls=[];runner=Runner(store,'token')
+    async def model(_job,_request,_directory,label,prompt,**kwargs):
+        calls.append(label)
+        (Path(_request.repo)/'app.ts').write_text('export const answer = 43;\n')  # check wants 42
+        runner.model_remaining[_job['id']]=10  # almost no model time left after the first turn
+        return {'info':{'tokens':{}}},report('COMPLETE','Edited.')
+    runner.execute_model=model
+    await runner.run(store.next());stored=store.get(job['id']);result=stored['result']
+    assert calls==['edit'] and stored['state']=='completed' and result['worker_status']=='PARTIAL'
+    assert 'No repair was attempted: 10s of model time left' in result['report'] and 'Checks failed: answer' in result['report']
+    assert result['acceptance']['diff']['files']==1  # the patch is kept for the frontier

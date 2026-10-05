@@ -38,6 +38,14 @@ class JobRequest(BaseModel):
     repair_attempts: int = Field(default=0, ge=0, le=2)
     investigate_first: bool = False
     in_place: bool = False
+    skip_gate: bool = False
+    auto_split: bool = False  # when the complexity gate trips, run the proposed units one after another inside this job instead of refusing
+    continuation: bool = True  # after a reply cut off by the output limit, keep its complete blocks staged and ask the model to continue
+    model_output: Literal[4096, 8192] | None = None  # editor output cap in tokens (4096 unless set; 8192 is an experiment)
+    edit_format: Literal['text', 'json'] = 'text'
+    workspace_from: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')  # continue an earlier Editor job's private workspace
+    match_mode: Literal['substring', 'word', 'line'] = 'line'  # exact SEARCH matches must be whole lines; every recorded model SEARCH was
+    refuse_oversized: bool = False  # refuse (rather than only advise on) a task the complexity gate flags; continuation makes refusing unnecessary by default
     kind: Literal['find_code', 'explain', 'config_use', 'compare', 'check_requirement', 'mechanical', 'guard', 'regression_test', 'run_tests', 'fix_test'] | None = None
     model_context: Literal[16384, 32768] | None = None
     model_thinking: bool | None = None
@@ -49,6 +57,7 @@ class JobRequest(BaseModel):
     task: str = Field(min_length=1, max_length=12000)
     repo: str | None = None
     allowed_paths: list[str] = Field(default_factory=list, max_length=30)
+    delete_paths: list[str] = Field(default_factory=list, max_length=10)
     checks: list[Check] = Field(default_factory=list, max_length=12)
     context: str = Field(default='', max_length=16000)
     caller: str = Field(default='cli', max_length=80)
@@ -105,6 +114,8 @@ class JobRequest(BaseModel):
         if self.workflow == 'implement' and not (self.checks or self.profile_hash or self.profile_ref):
             raise ValueError('Implement workflow requires supplied validation checks')
         if self.in_place and self.role != 'editor': raise ValueError('in_place applies to Editor only')
+        if self.delete_paths and not set(self.delete_paths) <= set(self.allowed_paths): raise ValueError('delete_paths must be a subset of allowed_paths')
+        if self.workspace_from and (self.role != 'editor' or self.in_place): raise ValueError('workspace_from continues a private workspace and applies to Editor jobs that are not in_place')
         if self.kind:
             wanted = {'find_code': 'investigator', 'explain': 'investigator', 'config_use': 'investigator', 'compare': 'investigator', 'check_requirement': 'investigator',
                       'mechanical': 'editor', 'guard': 'editor', 'regression_test': 'editor', 'fix_test': 'editor', 'run_tests': 'validator'}[self.kind]
@@ -207,9 +218,12 @@ class AnswerReview(BaseModel):
         elif self.status == 'COMPLETE':self.status = 'PARTIAL'
         return self
 
+REVIEW_REASONS = ('truncated', 'wrong_edit', 'oversized', 'no_change', 'check_failed', 'scope', 'other')
+
 class Review(BaseModel):
     decision: Literal['accepted', 'rejected', 'takeover']
     notes: str = Field(default='', max_length=4000)
+    reason: Literal['truncated', 'wrong_edit', 'oversized', 'no_change', 'check_failed', 'scope', 'other'] | None = None
     baseline_frontier_tokens: int | None = Field(default=None, ge=0)
     delegated_frontier_tokens: int | None = Field(default=None, ge=0)
     baseline_frontier_cost: float | None = Field(default=None, ge=0)
@@ -217,6 +231,13 @@ class Review(BaseModel):
     measurement_source: Literal['measured', 'manual_estimate'] = 'measured'
     task_outcome: Literal['completed', 'partial', 'blocked'] | None = None
     review_effort_seconds: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode='after')
+    def say_why(self):
+        # A rejection or takeover with no reason cannot become a regression case; require it on input (stored reviews are untouched).
+        if self.decision in ('rejected', 'takeover') and len(self.notes.strip()) < 10:
+            raise ValueError('A rejected or takeover review needs notes (at least 10 characters) saying what went wrong, and ideally a reason: ' + ', '.join(REVIEW_REASONS))
+        return self
 
 
 class BoardModel(BaseModel):

@@ -11,8 +11,8 @@ import signal
 import subprocess
 import sys
 import time
-from . import workspace
-from .acceptance import build as build_acceptance
+from . import workspace, mappings
+from .acceptance import build as build_acceptance, cumulative, edit_summary, added_tests, context_summary
 from .models import JobRequest, AnswerReview
 from .settings import STATE, PROJECT, MODEL, URL, CONFIG
 from .report import CONTRACT, final_report, evidence_excerpt
@@ -148,6 +148,8 @@ class Runner:
                             self.store.event(job['id'],'effective-config',part)
                         elif part.get('type')=='effective-step-config':
                             self.store.event(job['id'],'effective-step-config',part)
+                        elif part.get('type')=='generation':
+                            self.store.event(job['id'],'generation',part)
                         elif part.get('type')=='inference-retry':
                             self.store.event(job['id'],'inference-retry',part)
                         elif part.get('type') in ('step-start','step-finish'):
@@ -290,6 +292,7 @@ class Runner:
                     if not cwd.is_dir():raise ScopeError('Check cwd is not a directory')
                     self.guard_next_dev(check,cwd)
                     env={k:v for k,v in os.environ.items() if k in ('PATH','HOME','USER','LANG','LC_ALL') or k in check.env_allowlist}
+                    env.setdefault('PYTHONDONTWRITEBYTECODE','1')  # a same-size edit within one second must not run stale bytecode from an earlier check
                     env.update(check.environment)
                     missing=[name for name in check.required_env if not env.get(name)]
                     if missing:raise ScopeError('Missing required environment: '+', '.join(missing))
@@ -367,7 +370,7 @@ class Runner:
 
     async def implement(self,job,request,directory,prompt):
         deadline=None if request.execution_preset else time.monotonic()+min(request.timeout,600)
-        sessions=[];attempts=[];checks=[];seconds=0
+        sessions=[];attempts=[];checks=[];seconds=0;turns=[];durations=[];budget_note=''
         scope=ScopedFiles(request)
         originals={path:(scope.path(path,exists=False).read_text() if scope.path(path,exists=False).is_file() else '')
                    for path in request.allowed_paths}
@@ -382,8 +385,10 @@ class Runner:
                     phase=kind or label,timeout=min(remaining,request.timeout))
                 sessions.append(session)
                 if not report: raise RuntimeError(label+' did not produce a valid report')
+                if kind=='edit':turns.append({'label':label,'status':report['status'],'findings':report['findings']})
                 return report
-            finally:seconds+=time.monotonic()-started
+            finally:
+                seconds+=time.monotonic()-started;durations.append(time.monotonic()-started)
         findings=''
         if request.investigate_first:
             investigation=await phase('investigate',prompt+'\nReturn concise evidence and unknowns.','investigate')
@@ -391,6 +396,7 @@ class Runner:
             findings=investigation['findings']+'\n'+investigation['files']
         editor=await phase('edit',prompt+'\nAuthorized files: '+json.dumps(request.allowed_paths)+
                            '\nInvestigated findings: '+findings+'\nMake the exact requested change.','edit')
+        if editor['status']=='BLOCKED':return editor,checks,sessions,seconds,attempts  # refused before any model call: no checks or repairs to run
         for attempt in range(request.repair_attempts+1):
             if deadline is not None and time.monotonic()>=deadline:raise TimeoutError('Implement workflow exceeded its total time budget')
             checks=await self.checks(job,request,directory,attempt=attempt,deadline=deadline)
@@ -411,18 +417,27 @@ class Runner:
             self.store.event(job['id'],'attempt',attempts[-1])
             if passed:
                 notes=(('\nLocal review (advisory): '+review['findings']) if review else '')
-                body=('LOCAL_WORKER_REPORT\nStatus: COMPLETE\nFindings:\n'+editor['findings']+notes+
-                      '\nFiles:\n'+editor['files']+'\nChecks:\n'+direct_report(checks)['checks']+
+                found,listed=cumulative(diff,turns)
+                body=('LOCAL_WORKER_REPORT\nStatus: COMPLETE\nFindings:\n'+found+notes+
+                      '\nFiles:\n'+listed+'\nChecks:\n'+direct_report(checks)['checks']+
                       '\nRisks:\n'+(editor['risks'] if editor['status']!='COMPLETE' else (review['risks'] if review else 'None identified.'))+
                       '\nEND_LOCAL_WORKER_REPORT')
                 return parse_report(body),checks,sessions,seconds,attempts
             if attempt>=request.repair_attempts or not failing or any(c.get('status') in ('blocked','cancelled') or c.get('timed_out') for c in checks):break
+            left=self.model_remaining.get(job['id'],request.model_budget()) if deadline is None else deadline-time.monotonic()
+            needed=max(15,0.8*durations[-1])
+            if left<needed:
+                # A repair that cannot finish would be cut off and lose the whole job; keep the result and say why there was no repair.
+                budget_note=f'No repair was attempted: {max(0,int(left))}s of model time left, the last turn took {int(durations[-1])}s'
+                break
             editor=await phase('repair-'+str(attempt+1),prompt+'\nAuthorized files: '+json.dumps(request.allowed_paths)+
                                '\nThe approved checks failed. Fix the cause with one targeted repair.\nRecorded failed checks:\n'+analysis_evidence(checks)+
                                '\nCurrent diff:\n'+diff[:24000],'edit')
         remaining=('Checks failed: '+', '.join(c['name'] for c in failing)) if failing else ('No authorized file change was made' if not diff else 'No approved check ran')
-        body=('LOCAL_WORKER_REPORT\nStatus: PARTIAL\nFindings:\n'+editor['findings']+
-              '\nRemaining issue: '+remaining+'\nFiles:\n'+editor['files']+
+        if budget_note:remaining+='. '+budget_note
+        found,listed=cumulative(diff,turns)
+        body=('LOCAL_WORKER_REPORT\nStatus: PARTIAL\nFindings:\n'+found+
+              '\nRemaining issue: '+remaining+'\nFiles:\n'+listed+
               '\nChecks:\n'+direct_report(checks)['checks']+'\nRisks:\n'+(review['risks'] if review else editor['risks'])+
               '\nEND_LOCAL_WORKER_REPORT')
         return parse_report(body),checks,sessions,seconds,attempts
@@ -528,7 +543,12 @@ class Runner:
                     # The worker edits and checks a private copy; the user's tree changes only through apply_result.
                     self.phase(job['id'],'workspace')
                     await asyncio.to_thread(workspace.purge_old)
-                    workspace_record=await asyncio.to_thread(workspace.create,request.repo,job['id'],request.allowed_paths)
+                    parent=request.workspace_from
+                    checks_json=[c.model_dump() for c in request.checks]
+                    if parent:  # continue an earlier job's workspace: this job's diff is its own, one apply writes the whole chain
+                        workspace_record=await asyncio.to_thread(workspace.chain,request.repo,job['id'],parent,request.allowed_paths,request.read_paths,request.delete_paths,checks_json)
+                    else:
+                        workspace_record=await asyncio.to_thread(workspace.create,request.repo,job['id'],request.allowed_paths,request.read_paths,request.delete_paths,checks_json)
                     origin_repo=request.repo
                     request=request.model_copy(update={'repo':workspace_record['path']})
                     (directory/'request.json').write_text(request.model_dump_json())
@@ -590,8 +610,9 @@ class Runner:
             if request.role=='editor':
                 scoped=self.scoped_diff(request,originals);(directory/'scoped-diff.txt').write_text(scoped);(directory/'scoped-diff.txt').chmod(0o600)
             if origin_repo:
-                patch_text=await asyncio.to_thread(workspace.patch,job['id'])
-                shutil.copyfile(workspace.ROOT/job['id']/'patch.diff',directory/'patch.diff');(directory/'patch.diff').chmod(0o600)
+                cumulative_text=await asyncio.to_thread(workspace.patch,job['id'])
+                for artifact in ('patch.diff','job.diff'):shutil.copyfile(workspace.ROOT/job['id']/artifact,directory/artifact);(directory/artifact).chmod(0o600)
+                patch_text=(workspace.ROOT/job['id']/'job.diff').read_text()  # the packet describes this job; patch.diff is cumulative across a chain
                 outside,extra=await asyncio.to_thread(workspace.outside_scope,job['id'])
             tool_events=[]
             if (directory/'tools.jsonl').exists():
@@ -600,17 +621,29 @@ class Runner:
             self.audit(job['id'],directory)
             edits=[e['data']['path'] for e in tool_events if e['kind']=='edit']
             check_failure=any(failed(c) for c in checks)
+            mapping_issue=None;mapping_result=None
+            if request.role=='editor' and originals:
+                try:
+                    after_files={p:(Path(request.repo)/p).read_text() for p in request.allowed_paths if (Path(request.repo)/p).is_file()}
+                    mapping_result=mappings.verify(request.task,{p:t for p,t in originals.items() if t},after_files)
+                    if mapping_result['unmet']:
+                        mapping_issue='Task mappings not fully applied: '+'; '.join(f"'{m['old']}' -> '{m['new']}' ({m['reason']}{', still '+str(m['remaining'])+' time(s)' if m['remaining'] else ''})" for m in mapping_result['unmet'][:4])
+                except (OSError,UnicodeError):pass
             regression_issue=None
             if request.kind=='regression_test' and baseline_ids is not None:
                 now={f['test_id'] for c in checks for f in c.get('failures') or []}
                 fresh=sorted(now-baseline_ids)
                 broken=[i for i in fresh if re.fullmatch(r'[\w./-]+\.\w+',i)]  # a bare file path is a collection or syntax error, not a failing test
                 named=[i for i in fresh if i not in broken]
+                added=added_tests(patch_text if origin_repo else ((directory/'scoped-diff.txt').read_text() if (directory/'scoped-diff.txt').is_file() else ''))
+                authored=[i for i in named if any(n in i for n in added)]  # the failing test must be one this job added, not an existing test edited to fail
+                altered=[i for i in named if i not in authored]
                 unparsed=any(failed(c) and not c.get('failures') for c in checks)
-                ok=bool(named) and not broken and not unparsed
-                regression={'baseline_failing':sorted(baseline_ids)[:20],'new_failing':named[:20],'collection_errors':broken[:5],'reproduces_bug':ok}
+                ok=bool(authored) and not broken and not unparsed
+                regression={'baseline_failing':sorted(baseline_ids)[:20],'new_failing':authored[:20],'modified_existing_failing':altered[:20],'collection_errors':broken[:5],'reproduces_bug':ok}
                 check_failure=not ok
                 regression_issue=None if ok else ('The new test file does not collect or run: '+', '.join(broken[:3]) if broken else 'Failing output could not be parsed' if unparsed
+                                                  else 'A test fails now, but this job did not add it (an existing test was changed to fail): '+', '.join(altered[:2]) if altered
                                                   else 'No new failing test: the added test passes on the current code, so it does not reproduce the bug')
             result={'report':report['report'] if report else None,'worker_status':report['status'] if report else None,
                 'report_valid':bool(report),'checks':checks,'changed_files':sorted(set(edits)),
@@ -633,21 +666,45 @@ class Runner:
                 result['web_verification']={'artifact':verification.name,'verified_observations':len(recorded['observations']),
                     'verified_sources':len({item['url'] for item in recorded['observations']}),
                     'issues':recorded['issues']}
-            remaining=regression_issue or ('; '.join(f"{c['name']}: {c.get('status')}, exit={c.get('exit_code')}" for c in checks if failed(c))[:500] if check_failure else None)
+            remaining=regression_issue or mapping_issue or ('; '.join(f"{c['name']}: {c.get('status')}, exit={c.get('exit_code')}" for c in checks if failed(c))[:500] if check_failure else None)
             result['completion']={'remaining_issue':remaining if check_failure else None if report and report['status']=='COMPLETE' else (report['findings'][-500:] if report else 'No valid report'),
                 'blocking_category':'check_failure' if check_failure else 'evidence_or_scope' if report and report['status']=='BLOCKED' else None,
                 'next_action':'frontier_review' if report and report['status']=='COMPLETE' and not check_failure else 'frontier_decision'}
+            if report and report['status']=='COMPLETE' and mapping_issue and not check_failure:
+                # The model said it was done, but the task's own `old -> new` mappings are visibly unmet in the files.
+                result['worker_status']='PARTIAL'
+                result['report']=result['report'].replace('Status: COMPLETE','Status: PARTIAL',1).replace('Risks:\n','Risks:\n'+mapping_issue+'. ',1)
+                result['completion'].update(remaining_issue=mapping_issue,next_action='frontier_decision')
+            if mapping_result:result['mappings']=mapping_result
             if report and report['status']=='COMPLETE' and check_failure:
                 result['worker_status']='PARTIAL'
                 result['report']=result['report'].replace('Status: COMPLETE','Status: PARTIAL',1)
             if regression:result['regression']=regression
+            edit_meta=None
+            if request.role=='editor':
+                edit_meta=edit_summary([json.loads(path.read_text()) for path in sorted(directory.glob('*.turns.json'))])
+                edit_meta['context']=context_summary([json.loads(path.read_text()) for path in sorted(directory.glob('*.context.json'))])
             if origin_repo:
+                saved=workspace.read_record(job['id'])
                 unchanged=all(workspace.sha(Path(origin_repo)/p)==workspace_record['base'][p] for p in request.allowed_paths)
                 result['repo']=origin_repo
-                result['workspace']={'state':'ready','origin':origin_repo,'patch':'patch.diff','origin_unchanged':unchanged}
+                result['workspace']={'state':'ready','origin':origin_repo,'patch':'patch.diff','origin_unchanged':unchanged,'chain':saved.get('chain',[job['id']]) if len(saved.get('chain',[]))>1 else None}
                 result['acceptance']=build_acceptance(patch_text,checks,result['worker_status'] or 'NO_REPORT',request.allowed_paths,attempts,'ready',outside,extra,
-                                                      result['completion']['remaining_issue'],regression)
+                                                      result['completion']['remaining_issue'],regression,edit_meta,removed=saved.get('removed',[]),declared_deletions=saved.get('delete',[]),
+                                                      dependencies=len(saved.get('dependencies',{})))
                 result['completion']['next_action']=result['acceptance']['next_action']
+            elif request.role=='editor' and request.repo:
+                # In-place jobs get the same host-derived packet, from the authorized-file diff.
+                result['acceptance']=build_acceptance((directory/'scoped-diff.txt').read_text(),checks,result['worker_status'] or 'NO_REPORT',request.allowed_paths,attempts,'in_place',
+                                                      [],[],result['completion']['remaining_issue'],regression,edit_meta)
+                result['completion']['next_action']=result['acceptance']['next_action']
+            gate_files=sorted(directory.glob('*.gate.json'))
+            if gate_files:
+                decision=json.loads(gate_files[0].read_text())
+                result['gate']={k:decision.get(k) for k in ('counts','tripped','reasons','mode')}
+                if decision.get('mode')=='refused' and report and report['status']=='BLOCKED':
+                    result['proposed_split']=decision['units']
+                    result['completion'].update(remaining_issue='Refused as too large for one generation; resubmit the units in proposed_split',blocking_category='oversized',next_action='split_and_resubmit')
             if report:(directory/'report.txt').write_text(result['report']);(directory/'report.txt').chmod(0o600)
             result['metrics']=self.metrics(job,checks,started,model_seconds)
             self.store.finish(job['id'],'completed' if report else 'failed',result)
@@ -659,7 +716,9 @@ class Runner:
                                                   'metrics':self.metrics(job,checks,started,model_seconds)})
         except Exception as e:
             checks=(self.store.get(job['id']).get('result') or {}).get('checks',checks)
-            result={'error':str(e),'usage':self.usage(job['id'],sessions),'checks':checks,'report_valid':False,
+            note=''
+            if request.role=='editor' and (directory/'staged.diff').is_file():note='. Edits staged before this stopped were not applied; they are in staged.diff'
+            result={'error':str(e)+note,'usage':self.usage(job['id'],sessions),'checks':checks,'report_valid':False,
                     'answer_review':self.unfinished_review(request,directory),
                     'metrics':self.metrics(job,checks,started,model_seconds)}
             self.store.event(job['id'],'error',{'message':str(e)})

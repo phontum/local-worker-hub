@@ -74,7 +74,7 @@ def test_apply_refuses_when_the_user_changed_an_authorized_file_meanwhile(origin
     (work / 'b.py').write_text('y = 3\n')
     (origin / 'a.py').write_text('x = 99  # user edit\n')
     result = workspace.apply('job3')
-    assert result == {'applied': [], 'conflicts': ['a.py'], 'state': 'ready'}
+    assert result == {'applied': [], 'conflicts': ['a.py'], 'stale_dependencies': [], 'state': 'ready'}
     assert (origin / 'a.py').read_text() == 'x = 99  # user edit\n' and (origin / 'b.py').read_text() == 'y = 2\n'
 
 

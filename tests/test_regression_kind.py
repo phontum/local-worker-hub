@@ -79,3 +79,24 @@ def test_kind_must_match_the_role_and_fix_test_defaults_to_one_repair(project):
     assert fix.workflow == 'implement' and fix.repair_attempts == 1
     explicit = JobRequest(role='editor', kind='fix_test', repo=str(project), task='x', allowed_paths=['calc.py'], checks=[check], workflow='single', idempotency_key='k4')
     assert explicit.workflow == 'single' and explicit.repair_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_an_existing_test_edited_to_fail_is_not_a_reproduction(store, project):
+    job = store.submit(request(project, 'rt-altered'))
+    runner = Runner(store, 'token')
+    async def model(_job, _request, directory, label, prompt, **kwargs):
+        target = Path(_request.repo) / 'tests' / 'test_calc.py'
+        target.write_text(BASE_TEST.replace('== 2', '== 3'))  # the existing test now fails, but no test was added
+        return {'info': {'tokens': {}}}, parse_report('LOCAL_WORKER_REPORT\nStatus: COMPLETE\nFindings:\nAdded a test.\nFiles:\ntests/test_calc.py\nChecks:\nNot run.\nRisks:\nNone.\nEND_LOCAL_WORKER_REPORT')
+    runner.execute_model = model
+    await runner.run(store.next())
+    result = store.get(job['id'])['result']
+    assert result['regression']['reproduces_bug'] is False and result['regression']['modified_existing_failing'] == ['tests/test_calc.py::test_add']
+    assert result['worker_status'] == 'PARTIAL' and 'did not add it' in result['completion']['remaining_issue']
+
+
+def test_added_tests_are_read_from_pytest_and_js_diffs():
+    from hub.acceptance import added_tests
+    patch = "+def test_total_is_exact():\n+    pass\n+  it('shows the label', () => {\n+  test.only('only this', () => {})\n-def test_removed():\n"
+    assert added_tests(patch) == {'test_total_is_exact', 'shows the label', 'only this'}

@@ -191,7 +191,7 @@ def test_editor_profile_and_handoff_accounting(repo,store,tmp_path,monkeypatch):
         else:second=j['id']
     store.review(first,Review(decision='accepted',baseline_frontier_tokens=100,delegated_frontier_tokens=120,review_effort_seconds=5))
     with pytest.raises(ValueError,match='once per handoff'):store.review(second,Review(decision='accepted',baseline_frontier_tokens=100,delegated_frontier_tokens=20))
-    store.review(second,Review(decision='takeover',review_effort_seconds=7))
+    store.review(second,Review(decision='takeover',notes='Took over after the repair failed',review_effort_seconds=7))
     summary=store.summary();group=next(g for g in summary['handoff_stats'] if g['id']=='one-task')
     assert summary['estimated_frontier_tokens_avoided']==-20
     assert group['jobs']==2 and group['local_output_tokens']==20 and group['review_effort_seconds']==12 and group['takeovers']==1

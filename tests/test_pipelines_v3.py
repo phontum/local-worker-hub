@@ -156,8 +156,8 @@ async def test_ask_reports_when_the_web_gave_nothing(tmp_path, monkeypatch):
 
 def test_parse_blocks_with_fences_and_path_lines():
     reply = 'FILE: a.py\n```python\n<<<<<<< SEARCH\nx = 1\n=======\nx = 2\n>>>>>>> REPLACE\n```\nb.py\n<<<<<<< WHOLE\nnew\n>>>>>>> WHOLE\nSummary: changed x'
-    edits = textedit.parse(reply)
-    assert [(e.path, e.search, e.replace) for e in edits] == [('a.py', 'x = 1', 'x = 2'), ('b.py', None, 'new\n')] and textedit.summary(reply) == 'changed x'
+    parsed = textedit.parse(reply)
+    assert [(e.path, e.search, e.replace) for e in parsed.edits] == [('a.py', 'x = 1', 'x = 2'), ('b.py', None, 'new\n')] and not parsed.problems and parsed.summary == 'changed x'
 
 def test_apply_exact_whitespace_tolerant_ambiguous_and_missing():
     source = 'def f():\n    a = 1\n    return a\n'
@@ -175,7 +175,9 @@ def test_apply_all_writes_through_guards_and_respects_freshness(repo):
     snaps = {r[0]: r for r in (textedit.snapshot(files, p) for p in ('app.ts', 'new.ts'))}
     changed, errors = textedit.apply_all(files, [textedit.Edit('app.ts', 'answer = 41', 'answer = 42'), textedit.Edit('new.ts', None, 'export {}\n'),
                                                  textedit.Edit('other.ts', None, 'x')], snaps)
-    assert changed == ['app.ts', 'new.ts'] and (repo / 'app.ts').read_text() == 'export const answer = 42;\n' and 'not one of the authorized' in errors[0]
+    assert changed == [] and 'not one of the authorized' in errors[0] and (repo / 'app.ts').read_text() == 'export const answer = 41;\n' and not (repo / 'new.ts').exists()  # all or nothing
+    changed, errors = textedit.apply_all(files, [textedit.Edit('app.ts', 'answer = 41', 'answer = 42'), textedit.Edit('new.ts', None, 'export {}\n')], snaps)
+    assert changed == ['app.ts', 'new.ts'] and not errors and (repo / 'app.ts').read_text() == 'export const answer = 42;\n'
     snaps = {r[0]: r for r in [textedit.snapshot(files, 'app.ts')]}
     (repo / 'app.ts').write_text('export const answer = 7;\n')  # changed by someone else after the host read it
     changed, errors = textedit.apply_all(files, [textedit.Edit('app.ts', 'answer = 42', 'answer = 43')], snaps)
@@ -252,11 +254,11 @@ async def test_edit_pipeline_applies_blocks_and_retries_once_with_the_exact_fail
                'FILE: app.ts\n<<<<<<< SEARCH\nexport const answer = 41;\n=======\nexport const answer = 42;\n>>>>>>> REPLACE\nSummary: set answer to 42']
     prompts = []
     async def call(client, d, label, name, step, body, event):
-        prompts.append(body['messages'][1]['content']); return {'message': {'content': replies.pop(0)}}
+        prompts.append(body['messages'][1]['content']); return {'message': {'content': replies.pop(0)}, 'done_reason': 'stop', 'eval_count': 50}
     monkeypatch.setattr(calls, 'call', call)
     await pipelines.run_edit(directory, 'edit', 'Task:\nSet answer to 42', 'edit')
     report = final_report(json.loads((directory / 'edit.session.json').read_text()))
-    assert (repo / 'app.ts').read_text() == 'export const answer = 42;\n' and report['status'] == 'COMPLETE' and report['findings'] == 'set answer to 42'
+    assert (repo / 'app.ts').read_text() == 'export const answer = 42;\n' and report['status'] == 'COMPLETE' and report['findings'] == 'Applied 1 file(s): app.ts. Model summary: set answer to 42'
     assert 'could not be applied' in prompts[1] and 'does not match' in prompts[1]
     assert any(json.loads(l)['kind'] == 'edit' for l in (directory / 'tools.jsonl').read_text().splitlines())
 
@@ -304,7 +306,7 @@ async def test_edit_thinks_only_when_explicitly_asked_even_if_the_role_profile_s
     (directory / 'request.json').write_text(JobRequest(role='editor', repo=str(repo), task='Set answer to 42', allowed_paths=['app.ts'], idempotency_key='th', model_thinking=model_thinking).model_dump_json())
     seen = []
     async def call(client, d, label, name, step, body, event):
-        seen.append(body['think']); return {'message': {'content': 'FILE: app.ts\n<<<<<<< SEARCH\nexport const answer = 41;\n=======\nexport const answer = 42;\n>>>>>>> REPLACE'}}
+        seen.append(body['think']); return {'message': {'content': 'FILE: app.ts\n<<<<<<< SEARCH\nexport const answer = 41;\n=======\nexport const answer = 42;\n>>>>>>> REPLACE'}, 'done_reason': 'stop', 'eval_count': 40}
     monkeypatch.setattr(calls, 'call', call)
     await pipelines.run_edit(directory, 'edit', 'Set answer to 42', 'edit')
     assert seen == [expected]

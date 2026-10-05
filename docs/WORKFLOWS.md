@@ -485,6 +485,51 @@ instances; Exa remains the fallback. The strict `--verify` loop keeps using Exa.
 - Ambiguous or missing matches get one corrective turn with the exact error.
 - Writes go through `ScopedFiles` (exact paths, symlink, hardlink, secret and freshness checks against the hash taken
   when the host read the file).
+- **Strict, transactional edits.** The reply is parsed whole: every block needs its `=======` and `>>>>>>> REPLACE` (or `>>>>>>> WHOLE`) line, markers are
+  exactly seven characters, and the reply should end with `END OF EDITS`. A reply cut off by the output limit (`done_reason: length`, or the cap reached) applies **nothing**
+  and the report says it was cut off; so does any malformed block. Planning happens in memory; files are written only if every file plans cleanly, in one commit with rollback.
+  Files that planned cleanly stay staged for the single corrective turn, and an aborted job leaves `staged.diff` for takeover.
+- **Destructive-edit guard.** A block that replaces 20+ lines with fewer than a quarter, a file that would lose 40% of its lines, or two or more removed definitions with none
+  added is refused and sent back for correction instead of applied.
+- **Honest reports.** Findings and Files come from the actual diff (never from the last model turn), with one line per editor turn; the acceptance packet is built for every Editor
+  job, in-place included, and carries generation, truncation and rejected-reply counts. Task mappings written as `old -> new` are checked after the edit: if the old text is still
+  in the files the job ends PARTIAL naming them. A regression test must define the failing test on an added line, and checks run with `PYTHONDONTWRITEBYTECODE=1`.
+- **Reviews.** `record_review` needs notes (at least 10 characters) for `rejected` and `takeover`, and takes a `reason` (`truncated`, `wrong_edit`, `oversized`, `no_change`,
+  `check_failed`, `scope`, `other`). `local-worker incident JOB [--out FILE]` exports a metadata-only record (file aliases, counts, finish reasons, error categories; no source or
+  task text) that can become a regression case. `/api/summary` reports rejections and takeovers by kind and reason (`review_stats`).
+- **Context packing** (`hub/contextpack.py`): the model sees a file whole when it fits (context window minus the output cap, a margin and the rest of the prompt, at about 3.2 characters per token);
+  a larger file is shown as its head, the lines holding every quoted string and the old side of every `old -> new` in the task, identifiers (protocol words such as `SEARCH` removed),
+  definitions whose names match the task, then neighbouring lines until the budget is spent, with explicit `lines a-b not shown` markers. Files in `read_paths` that are not authorized are
+  added as read-only references (whole, or signatures when large). `context.json` in the job directory and `acceptance.edits.context` report what was shown, which named texts were not found
+  and which references were used. If every `old -> new` text of a task is missing from the authorized files the job is refused without a model call; if some are missing the prompt says so.
+- **Continuation after a cut-off reply** (default, `continuation`): when the output limit cuts a reply off, the complete blocks it did produce are planned in memory and kept staged (never
+  written), the cut-off block is dropped, and the model is shown the file with those edits applied and asked to continue with only what is missing; up to five continuation turns, each must add
+  at least one block, and a complete block that does not match stops the job. Nothing reaches your tree until the single all-or-nothing commit at the end; `staged.diff` and the turn records are written as
+  the job goes, so a job that is killed for time leaves them. This is what makes a task that repeats one change across many places (16 handlers wrapped in try/catch) finish instead of losing everything.
+- **Complexity gate** (`hub/editgate.py`): counts renames, mapped values, behavioural clauses and task length (14+ changes, 8+ behaviours or 1800+ characters trips it). By default it only **advises**: the
+  decision is saved as `gate.json` (mode `advised`) for calibration and the job runs. `refuse_oversized` refuses before any model call (BLOCKED, `next_action: split_and_resubmit`) with `proposed_split`,
+  units grouped by file, at most six changes each, each with a ready-to-submit task; `skip_gate` / `--no-gate` ignores it. It is advisory because, with continuation, a flagged task that Gemma does in
+  one shot (the 15-change experiment: 3/3 correct in about 20 s) was being refused for nothing.
+- **Automatic decomposition** (`auto_split` / `--auto-split`, experimental, off by default): a flagged task runs as the gate's units one after another inside one job, each against the file with the earlier
+  units' edits staged, one commit at the end; a unit that does nothing new is fine (the final mapping check still catches omissions). Measured: it did not beat one-shot with continuation (see
+  `benchmarks/RESULTS.md`): units lose what words like "these labels" refer to, and when shown the whole task they start on each other's parts.
+- **Workspace chaining** (`continue_from` on `implement_change`, `--continue-from`): a job can start inside an earlier Editor job's private workspace. Its packet and `job.diff` describe only its own change,
+  `patch.diff` is cumulative, conflicts are judged against your tree, the earlier job becomes `chained`, and one `apply_result` on the last job writes the whole chain (revalidation runs every job's checks;
+  `revert_result` restores from the earliest snapshot; discarding the last job discards the chain).
+- **Match mode** (`match_mode`, default `line`): an exact SEARCH match must cover whole lines (`word` and `substring` are looser). Every one of the 581 recorded SEARCH blocks of earlier runs, and all 120 in the
+  runs since, was whole-line aligned, so nothing legitimate is refused; it removes the wrong-place edit where the searched text merely occurs inside something else (`x = 1` inside `max = 1`) and lets a
+  stricter match disambiguate. Per-turn alignment counts are recorded in the turn files.
+- **Output cap and format experiments** (`model_output` 8192, `edit_format` json; request fields, not exposed over MCP): neither is on by default. 8K without continuation fixes only tasks between 4K and 8K tokens;
+  with continuation it saves one turn on the largest case (about 5% of the time). The JSON format matched the text format on the heavy workload but lost 6 of 27 editor runs on ordinary small edits.
+- **Deletion, dependencies, revalidation, revert.** `delete_paths` (a subset of `allowed_paths`) lets the model use a `DELETE` block for those files only; a file that disappears otherwise is never applied.
+  `apply_result` takes `accept_removals`, `revalidate` (re-runs the approved checks on your tree as it is now plus the patch, in a throwaway copy, and writes nothing if they fail) and `run_checks`
+  (runs them in your tree after the write; no automatic revert). It reports `stale_dependencies`: `read_paths` files that changed in your tree since the job started. `revert_result` restores the
+  snapshot content (and deletes files the job created) unless a file changed again. Re-run checks run synchronously with a 120 s cap and refuse checks that need the job runner (dependencies, test
+  database, dev-server guard, required environment). A repair turn that cannot finish in the remaining model time is skipped with the reason stated, and the patch is kept.
+- Checks (and re-run checks) run with the hub service's PATH, not your shell's: name an interpreter that exists there (for example the project's virtualenv Python); a missing program is reported as a blocked check.
+- **MCP wrappers**: `investigate_code`, `implement_change`, `fix_failing_test`, `add_regression_test` and `run_checks` set the safe defaults (kind, private workspace, implement workflow with one repair
+  when checks are given, read scope that contains the editable files, generated idempotency key) and return the next step. `submit_job` stays for everything else.
+- **`in_place`** is not available over MCP (the service refuses it); `local-worker --in-place` remains for humans.
 - **Private workspace (default).** The worker edits and runs its checks in `STATE/workspaces/<job>`, a copy of the repository as it is
   now: tracked and untracked-but-not-ignored files, uncommitted changes included, secret files left out, `node_modules`/`.venv`
   linked. A private git repository there (never your `.git`) makes the patch exact. Your tree is not touched while the job runs.
@@ -508,6 +553,10 @@ mechanical change, guard, regression test, run tests, fix an exact failing test,
 projects, graded mechanically (gold `path:line` references, hidden checks the worker never sees, a regression test must fail on
 the bug and pass with a reference fix). The model is chosen per request and verified from the job's effective-config events;
 `--compare A B` applies the pre-registered decision rule. Results are in `benchmarks/RESULTS.md`.
+
+**Frontier-incident benchmark**: `benchmarks/eval_incidents.py` reproduces the real failures with synthetic fixtures (a ~470-line component, its stylesheet and test, an oversized
+ten-change task and the same work split per file) and reports false-COMPLETE, destructive-edit escapes, partial applications, silent truncations, seconds, tokens and review effort.
+Deterministic replays of each documented failure live in `tests/test_edit_incidents.py`.
 
 ## Hardware and runtime notes
 

@@ -50,9 +50,10 @@ def live_workspace(job):
     if not recorded:return None
     try:
         from . import workspace
-        state=workspace.read_record(job['id'])['state']
-    except Exception:state=recorded.get('state')
-    return {**recorded,'state':state}
+        record=workspace.read_record(job['id']);state=record['state']
+        extra={'stale_dependencies':workspace.stale_dependencies(job['id']),'removed':record.get('removed',[])}
+    except Exception:state=recorded.get('state');extra={}
+    return {**recorded,'state':state,**extra}
 
 
 def result_summary(job):
@@ -79,6 +80,8 @@ def result_summary(job):
                  review=job.get('review'), attempts=r.get('attempts',[])[:3], workflow=r.get('workflow'),
                  answer_review=r.get('answer_review'), board=r.get('board'), ask=r.get('ask'), artifacts=refs, full_result=f"/api/jobs/{job['id']}/result?view=full")
     if r.get('workspace'):value.update(workspace=live_workspace(job),acceptance=r.get('acceptance'));value['artifacts']=[*refs,'patch.diff']
+    elif r.get('acceptance'):value['acceptance']=r['acceptance']
+    if r.get('proposed_split'):value['proposed_split']=r['proposed_split'];value['gate']=r.get('gate')
     parsed=parse_report(r.get('report') or '')
     if parsed:value['answer']=parsed['findings'][:3000]
     if value.get('metrics'):
@@ -106,6 +109,7 @@ def result_brief(job):
                     } if (board:=result.get('board')) else None,
            'requirements_review':{k:(result.get('answer_review') or {}).get(k) for k in ('state','status','initial_status')} if result.get('answer_review') else None,
            'next_action':(result.get('completion') or {}).get('next_action'),
+           'split_units':len(result.get('proposed_split') or []) or None,
            'workspace':({'state':(live_workspace(job) or {}).get('state'),'origin_unchanged':result['workspace'].get('origin_unchanged'),'patch':'patch.diff'}
                         if result.get('workspace') else None),
            'acceptance':({'scope_ok':a['scope_ok'],'diff':a['diff'],'review_focus':a['review_focus'][:3],'repair_used':a['repair_used']}

@@ -39,7 +39,7 @@ def resolve_phase(request, profiles, phase, report_only=False):
         request.execution_preset == 'extended' or bool(profile.get('thinking', phase in THINKING_PHASES)))
     alias = request.model or str(profile.get('model', DEFAULT_ALIAS))  # a per-request model beats every profile, for all phases of the job
     return PhaseSpec(phase=phase, alias=alias, model=model_name(alias), context=context,
-        output_limit=max(256, min(4096, int(profile.get('output', 4096)))), thinking=thinking,
+        output_limit=request.model_output or max(256, min(4096, int(profile.get('output', 4096)))), thinking=thinking,
         steps=2 if report_only or request.role == 'validator' else max(2, min(18, int(profile.get('steps', 12)))),
         tool_rounds=max(1, min(12, int(profile.get('tool_rounds', default_rounds(request, phase))))),
         temperature=float(profile.get('temperature', 0.2)),
