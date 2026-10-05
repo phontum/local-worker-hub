@@ -65,9 +65,9 @@ class LexicalProvider:
         return answer(self.name, 'syntactic', name=name, implementations=subs[:limit], total=len(subs),
                       note='classes that extend or implement the name (Python, TS/JS, Rust impl); Go interfaces are structural and not found')
 
-    def callers(self, name, limit=40):
+    def callers(self, name, limit=40, path=None):
         found = self.index.callers_of(name, limit)
-        return answer(self.name, 'syntactic', name=name, callers=found, total=len(found), note='call sites matched by callee name, not by resolved target')
+        return answer(self.name, 'syntactic', name=name, callers=found, total=len(found), note='call sites matched by callee name, not by resolved target' + ('; path is ignored without a language server' if path else ''))
 
     def callees(self, name, limit=40, path=None):
         out = []

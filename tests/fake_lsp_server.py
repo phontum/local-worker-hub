@@ -39,7 +39,9 @@ while True:
     if method in script.get("hang", []):
         time.sleep(30)
     if method == "initialize":
-        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}})
+        caps = {k: True for k in ("referencesProvider", "implementationProvider", "callHierarchyProvider")}
+        caps.update(script.get("capabilities", {}))
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": caps}})
     elif method == "shutdown":
         send({"jsonrpc": "2.0", "id": message["id"], "result": None})
     elif method in script.get("errors", []):

@@ -562,7 +562,9 @@ Deterministic replays of each documented failure live in `tests/test_edit_incide
   (and `local-worker intel TOOL NAME`) answered synchronously by the service from the CodeIndex (`hub/intel/`). Every answer says `provider` and `precision`:
   `syntactic` is a parsed exact-name match, `lexical` a name-contains fallback. They are name-based (same-named symbols are not told apart, at most 8 reference lines per
   file per word, Go interfaces are not found as implementations) and `diagnostics` reports syntax errors and unresolved relative imports only, not types. The interface
-  (`hub/intel/provider.py`) is what an LSP or SCIP provider would implement; none exists yet, and nothing has been benchmarked against a language server.
+  (`hub/intel/provider.py`) is implemented by the CodeIndex provider and by `hub/intel/lsp.py`, a thin stdio LSP client with a pool of at most two warm servers. A server runs only if the reviewed
+  project profile names it, for example `"lsp": {"python": ["/path/to/basedpyright-langserver", "--stdio"]}`; nothing is installed or started otherwise, and any failure falls back to the CodeIndex answer with the reason.
+  Measured on this repository (benchmarks/RESULTS.md): exact where names collide, a tie elsewhere, 20-70 ms warm; used for the Tier-0 tools only, not inside the pipelines.
 - **DelegationSpec** (`hub/spec.py`): goal, kind, targets, changes (with typed `old -> new` mappings), invariants and acceptance criteria, evidence, scope, checks.
   MCP `delegate(repo, spec)` or `local-worker spec check|submit FILE` compile it into the same JobRequest as before; `local-worker spec draft "task"` shows what the host
   understands of a natural-language task without a model. Mechanical criteria (`file_unchanged`, `symbol_exists`, `symbol_absent`, `no_new_files`, `check_passes`) are verified

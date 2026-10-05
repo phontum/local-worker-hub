@@ -8,7 +8,7 @@ from .lsp import LspProvider, approved_servers
 
 MAX_CHARS = 24_000
 TOOLS = {'find_symbol': ('definitions', ('name', 'kind', 'limit')), 'find_references': ('references', ('name', 'limit')),
-         'find_implementations': ('implementations', ('name', 'limit')), 'callers': ('callers', ('name', 'limit')), 'callees': ('callees', ('name', 'limit', 'path')),
+         'find_implementations': ('implementations', ('name', 'limit')), 'callers': ('callers', ('name', 'limit', 'path')), 'callees': ('callees', ('name', 'limit', 'path')),
          'diagnostics': ('diagnostics', ('paths', 'limit')), 'symbol_context': ('symbol_context', ('name', 'budget', 'path')), 'outline': ('outline', ('path',))}
 
 def provider_for(repo):

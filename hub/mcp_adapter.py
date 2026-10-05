@@ -207,9 +207,9 @@ def create_server():
         return intel('find_implementations',repo,name=name,limit=limit)
 
     @server.tool(annotations=READ)
-    def callers(repo: str, name: str, limit: int=40) -> dict:
-        """Call sites of a function or method with the definition each sits in, matched by callee name. Zero model tokens."""
-        return intel('callers',repo,name=name,limit=limit)
+    def callers(repo: str, name: str, limit: int=40, path: str | None=None) -> dict:
+        """Call sites of a function or method with the definition each sits in. Matched by callee name unless the project profile approves a language server, which resolves the exact target; path names the defining file when several functions share the name (used only with a server). Zero model tokens."""
+        return intel('callers',repo,name=name,limit=limit,path=path)
 
     @server.tool(annotations=READ)
     def callees(repo: str, name: str, limit: int=40, path: str | None=None) -> dict:

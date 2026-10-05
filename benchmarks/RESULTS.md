@@ -625,3 +625,22 @@ The `fix_test` frame context could not move this score: its fixtures (9/9 before
 (compare 3/6, check_requirement 6/9, regression_test 5/6). `eval_incidents` (3 repeats): 12/12 correct, 0 false-COMPLETE, 0 destructive escapes, 0 partial applications, 0 silent truncations.
 Index changes under test: nested Python functions/classes and imports inside function bodies are indexed (VERSION 4), refreshes come from an in-memory index. One configuration, one run each: no movement, not an improvement.
 `eval_intel` (lexical provider, 7 hand-checked cases on this repository): precision/recall 0.86 -> 1.00 after nested definitions; part of its gold was corrected after the first run, so this is a harness check, not a measurement.
+
+## Language server vs the CodeIndex, code intelligence — 2026-10-05
+
+`benchmarks/eval_intel.py`: 8 cases about this repository (definitions, callers, implementations), gold from hand reading plus, for the discriminating case, an AST scan independent of both providers. basedpyright 1.x (pip, run in a scratch
+virtualenv with `--stdio`), Python only, one repository, 3 repeats. Providers: `LexicalProvider` (CodeIndex, shipped) and `LspProvider` (thin client + server, lexical fallback).
+
+| | Lexical | LSP (basedpyright) |
+| --- | --- | --- |
+| Mean precision / recall (8 cases) | 0.98 / 0.97 | 1.00 / 1.00 |
+| callers of `workspace.apply` (two functions are named `apply`; 29 true callers) | P 0.81, R 0.76 | **P 1.00, R 1.00** |
+| Other cases (definitions, callers of `_commit`/`final_diff`, subclasses of `Strict`) | 1.00 / 1.00 | 1.00 / 1.00 |
+| Latency per call (median) | under 1 ms | 20-70 ms warm; first server start plus project analysis about 1.5 s |
+
+- The server is exact where names collide; the CodeIndex cannot tell same-named functions apart and so mixes in callers of `textedit.apply`. On the unambiguous cases they tie, so the gain is confined to ambiguity.
+- Found by running a real server, not visible against the fake one: a client must answer `workspace/configuration` with one entry per requested item (answering null made pyright find no references at all); pyright advertises
+  `implementationProvider` and does return subclasses, but includes the queried class itself; requests are now gated on advertised capabilities and an empty `implementation` answer falls back to the index's inheritance edges.
+- The gold for the first 7 cases was partly corrected after seeing the lexical run; only the `apply` case is independent of the providers.
+- **Promotion rule outcome:** LSP stays a Tier-0 tool provider (approved per project through the profile `lsp` field). It is NOT used inside the pipelines: `eval_junior` retrieval uses the CodeIndex, the warm server lives in the service
+  (not in the per-job engine process), and there is no downstream measurement showing it would help. TypeScript, Go and Rust servers were not tried.

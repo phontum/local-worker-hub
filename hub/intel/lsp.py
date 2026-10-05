@@ -39,6 +39,11 @@ class LspClient:
         self.counter = 0
         self.env = {k: v for k, v in os.environ.items() if k in ('PATH', 'HOME', 'USER', 'LANG', 'LC_ALL')} | (env or {})
         self.last_used = time.monotonic()
+        self.capabilities = {}
+
+    def supports(self, name):
+        """Whether the server advertised a capability (for example 'implementationProvider'); a request it did not advertise is not sent."""
+        return bool(self.capabilities.get(name))
 
     def start(self):
         try:
@@ -46,7 +51,10 @@ class LspClient:
         except OSError as error:
             raise LspError(f'could not start {self.argv[0]}: {error}') from error
         threading.Thread(target=self.read_loop, daemon=True).start()
-        self.request('initialize', {'processId': os.getpid(), 'rootUri': path_uri(self.root), 'capabilities': {'textDocument': {'publishDiagnostics': {}}}, 'workspaceFolders': None})
+        folder = {'uri': path_uri(self.root), 'name': self.root.name}
+        init = self.request('initialize', {'processId': os.getpid(), 'rootUri': path_uri(self.root), 'workspaceFolders': [folder],
+                                           'capabilities': {'workspace': {'configuration': True, 'workspaceFolders': True}, 'textDocument': {'publishDiagnostics': {}}}})
+        self.capabilities = (init or {}).get('capabilities', {})
         self.notify('initialized', {})
         return self
 
@@ -90,8 +98,9 @@ class LspClient:
         elif message.get('method') == 'textDocument/publishDiagnostics':
             params = message.get('params', {})
             self.diagnostics[uri_path(params.get('uri', ''))] = params.get('diagnostics', [])
-        elif 'id' in message and 'method' in message:  # a server-to-client request we do not implement: answer so it does not wait
-            self.send({'jsonrpc': '2.0', 'id': message['id'], 'result': None})
+        elif 'id' in message and 'method' in message:  # a server-to-client request: answer so the server does not wait
+            result = [{} for _ in message.get('params', {}).get('items', [])] if message['method'] == 'workspace/configuration' else None  # default settings for every section asked
+            self.send({'jsonrpc': '2.0', 'id': message['id'], 'result': result})
 
     def fail_all(self, reason):
         with self.lock:
@@ -214,6 +223,8 @@ class LspProvider(LexicalProvider):
                 return d['path'], d['start'] - 1, column
         return None
 
+    CAPABILITY = {'textDocument/references': 'referencesProvider', 'textDocument/implementation': 'implementationProvider', 'textDocument/prepareCallHierarchy': 'callHierarchyProvider'}
+
     def semantic(self, name, method, extra=None, path=None):
         spot = self.position(name, path)
         if spot is None:
@@ -222,6 +233,9 @@ class LspProvider(LexicalProvider):
         client = self.client_for(rel)
         if client is None:
             raise LspError('no approved language server for ' + (Path(rel).suffix or 'this file type'))
+        needed = self.CAPABILITY.get(method)
+        if needed and not client.supports(needed):
+            raise LspError(f'the language server does not advertise {needed}')
         client.open(self.files.path(rel), self.files.path(rel).read_text(errors='replace'))
         params = {'textDocument': {'uri': path_uri(self.files.path(rel))}, 'position': {'line': line, 'character': column}} | (extra or {})
         return rel, client.request(method, params)
@@ -242,16 +256,23 @@ class LspProvider(LexicalProvider):
             return self.lexical(super().references(name, limit), error)
 
     def implementations(self, name, limit=40):
+        """Servers answer `implementation` for interface members, and most return nothing for ordinary class inheritance, so an empty server answer is not trusted:
+        the inheritance edges of the index are used instead and the answer says so."""
         try:
             _, result = self.semantic(name, 'textDocument/implementation')
             found = [{'path': p, 'line': (loc.get('range') or loc.get('targetRange'))['start']['line'] + 1} for loc in result or [] if (p := self.relative(loc))]
-            return answer(self.name, 'semantic', name=name, implementations=found[:limit], total=len(found))
+            for row in found:  # name each location by the definition that starts there; servers return the queried class itself too
+                row['name'] = next((n for n, _, start, _ in self.index.data.get(row['path'], {}).get('defs', []) if start == row['line']), None)
+            found = [row for row in found if row['name'] != name]
+            if found:
+                return answer(self.name, 'semantic', name=name, implementations=found[:limit], total=len(found))
+            return self.lexical(super().implementations(name, limit), LspError('the server returned no implementations; used class inheritance from the index'))
         except LspError as error:
             return self.lexical(super().implementations(name, limit), error)
 
-    def callers(self, name, limit=40):
+    def callers(self, name, limit=40, path=None):
         try:
-            rel, items = self.semantic(name, 'textDocument/prepareCallHierarchy')
+            rel, items = self.semantic(name, 'textDocument/prepareCallHierarchy', path=path)
             client, out = self.client_for(rel), []
             for item in items or []:
                 for call in client.request('callHierarchy/incomingCalls', {'item': item}) or []:
@@ -259,7 +280,7 @@ class LspProvider(LexicalProvider):
                     out.append({'path': self.relative(caller), 'in': caller['name'], 'line': caller['selectionRange']['start']['line'] + 1})
             return answer(self.name, 'semantic', name=name, callers=out[:limit], total=len(out))
         except LspError as error:
-            return self.lexical(super().callers(name, limit), error)
+            return self.lexical(super().callers(name, limit, path), error)
 
     def diagnostics(self, paths=None, limit=60):
         base = super().diagnostics(paths, limit) | {'provider': 'codeindex'}
