@@ -16,7 +16,7 @@ from pathlib import Path
 from .localize import CODE, identifiers
 from .settings import STATE
 
-VERSION = 3
+VERSION = 4
 MAX_CALLS = 3000
 MAX_FILE = 300_000
 JS = {'.js', '.jsx', '.mjs', '.cjs'}
@@ -98,20 +98,27 @@ def python_facts(text):
                 name = base.id if isinstance(base, ast.Name) else base.attr if isinstance(base, ast.Attribute) else None
                 if name:
                     inherits.append([node.name, name, node.lineno])
-    def visit(body, owner=''):
+    def visit(body, owner='', inner=False):
+        """`inner` is a function body: nested functions and classes are definitions too (callers inside them need an owner), and imports there are real edges."""
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                defs.append([node.name, 'method' if owner else 'function', node.lineno, node.end_lineno or node.lineno])
+                defs.append([node.name, 'method' if owner and not inner else 'function', node.lineno, node.end_lineno or node.lineno])
+                visit(node.body, '', True)
             elif isinstance(node, ast.ClassDef):
                 defs.append([node.name, 'class', node.lineno, node.end_lineno or node.lineno])
-                visit(node.body, node.name)
-            elif isinstance(node, (ast.Assign, ast.AnnAssign)) and not owner:
+                visit(node.body, node.name, False)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)) and not owner and not inner:
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 defs.extend([t.id, 'variable', node.lineno, node.end_lineno or node.lineno] for t in targets if isinstance(t, ast.Name))
             elif isinstance(node, ast.Import):
                 imports.extend([alias.name, node.lineno] for alias in node.names)
             elif isinstance(node, ast.ImportFrom):
                 imports.append(['.' * node.level + (node.module or ''), node.lineno])
+            elif inner and isinstance(node, (ast.If, ast.Try, ast.With, ast.For, ast.While, ast.AsyncWith, ast.AsyncFor)):
+                for field in ('body', 'orelse', 'finalbody'):
+                    visit(getattr(node, field, []) or [], owner, inner)
+                for handler in getattr(node, 'handlers', []):
+                    visit(handler.body, owner, inner)
     visit(tree.body)
     return defs, imports, calls, inherits
 
@@ -203,15 +210,18 @@ class CodeIndex:
         return STATE / 'index' / (hashlib.sha1(str(root).encode()).hexdigest()[:16] + '.json')
 
     @classmethod
-    def load(cls, files):
-        """Build or refresh the index for the scoped repository; unchanged files come from the private cache."""
+    def load(cls, files, previous=None):
+        """Build or refresh the index for the scoped repository; unchanged files come from `previous` (an index already in memory) or the private cache."""
         self = cls(files)
         cache = self.cache_path(files.root)
-        try:
-            old = json.loads(cache.read_text()) if cache.exists() else {}
-        except (OSError, ValueError):
-            old = {}
-        old = old.get('files', {}) if old.get('version') == VERSION else {}
+        if previous is not None:
+            old = previous.data
+        else:
+            try:
+                old = json.loads(cache.read_text()) if cache.exists() else {}
+            except (OSError, ValueError):
+                old = {}
+            old = old.get('files', {}) if old.get('version') == VERSION else {}
         for path in files.inventory():
             if path.suffix not in CODE and path.suffix not in {'.md', '.txt', '.json', '.toml', '.yml', '.yaml', '.cfg', '.ini', '.rst'}:
                 continue

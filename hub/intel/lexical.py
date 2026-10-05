@@ -1,7 +1,8 @@
 """SymbolProvider on the CodeIndex: name-based and syntactic, offline, no language server. Honest about it: results carry precision and caveats."""
 import ast
 from pathlib import Path
-from ..codeindex import CODE, TESTISH, CodeIndex, language
+from ..codeindex import CODE, TESTISH, language
+from ..repostate import STATES
 from .provider import answer
 
 BODY_LINES = 60
@@ -36,7 +37,7 @@ class LexicalProvider:
 
     def __init__(self, files):
         self.files = files
-        self.index = CodeIndex.load(files)
+        self.index = STATES.index(files)  # warm per-repository index, refreshed incrementally
 
     def lines(self, path, start, end):
         try:

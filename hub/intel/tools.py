@@ -4,6 +4,7 @@ import uuid
 from ..models import JobRequest
 from ..scoped import ScopedFiles, ScopeError
 from .lexical import LexicalProvider
+from .lsp import LspProvider, approved_servers
 
 MAX_CHARS = 24_000
 TOOLS = {'find_symbol': ('definitions', ('name', 'kind', 'limit')), 'find_references': ('references', ('name', 'limit')),
@@ -13,7 +14,9 @@ TOOLS = {'find_symbol': ('definitions', ('name', 'kind', 'limit')), 'find_refere
 def provider_for(repo):
     """A read-only scoped view of the repository (the same secret, symlink and exclusion guards as the workers) and the provider over it."""
     request = JobRequest(role='investigator', repo=repo, task='code intelligence', idempotency_key=uuid.uuid4().hex)
-    return LexicalProvider(ScopedFiles(request))
+    files = ScopedFiles(request)
+    servers = approved_servers(repo)  # a language server runs only when the reviewed project profile names it
+    return LspProvider(files, servers) if servers else LexicalProvider(files)
 
 def run(tool, repo, arguments):
     if tool not in TOOLS:

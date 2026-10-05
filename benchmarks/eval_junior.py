@@ -270,7 +270,7 @@ def main():
     parser.add_argument('--model', help='Registered model alias sent with every request (default: the hub default)')
     parser.add_argument('--thinking', choices=['on', 'off'])
     parser.add_argument('--no-kind', action='store_true', help='Do not send the job kind (earlier runs did not)')
-    parser.add_argument('--request', action='append', metavar='KEY=VALUE', help='Extra request field (repeatable), e.g. match_mode=line or edit_format=json')
+    parser.add_argument('--request', action='append', metavar='KEY=VALUE', help='Extra request field (repeatable), e.g. match_mode=line or continuation=false')
     parser.add_argument('--repeat', type=int, default=3)
     parser.add_argument('--shape', nargs='+')
     parser.add_argument('--id', nargs='+')

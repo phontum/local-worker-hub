@@ -5,8 +5,8 @@ format from another. This script adds "heavy" jobs: a synthetic file of N handle
 structural change in every one of them, which makes the model re-emit large regions (N=8 needs roughly the 4K cap, N=16 roughly twice that).
 Variants are chosen with flags and verified from the job's own records (effective output cap, edit format, turn counts), because the request
 model ignores unknown fields silently.
-Usage: .venv/bin/python benchmarks/eval_editor_experiments.py --handlers 8 [--output 4096|8192] [--format text|json] [--no-continue]
-       [--auto-split] [--match substring|word|line] [--repeat N] [--label L]
+Usage: .venv/bin/python benchmarks/eval_editor_experiments.py --handlers 8 [--output 4096|8192] [--no-continue]
+       [--match substring|line] [--repeat N] [--label L]
 Measured per run: correct (every handler changed, nothing else damaged), COMPLETE-but-wrong, truncations, continuation turns, generations, output tokens, seconds.
 """
 import argparse
@@ -86,7 +86,7 @@ def big_run(args, root):
         key, _, value = pair.partition('=')
         extra[key] = json.loads(value) if value[:1] in '0123456789tfn[{\"' else value
     request = JobRequest(role='editor', repo=str(repo), task=task, allowed_paths=inc.ALLOWED, workflow='single', execution_preset='work', timeout=args.timeout,
-                         idempotency_key=uuid.uuid4().hex, caller='eval', model=args.model, skip_gate=args.no_gate, auto_split=args.auto_split, **extra)
+                         idempotency_key=uuid.uuid4().hex, caller='eval', model=args.model, skip_gate=args.no_gate, **extra)
     started = time.monotonic()
     ident = call('POST', '/api/jobs', request.model_dump())['id']
     status = wait(ident, args.timeout + 300)
@@ -107,7 +107,7 @@ def big_run(args, root):
     gate = (result.get('gate') or {})
     return {'job': ident, 'handlers': 'big', 'status': state, 'correct': ok, 'false_complete': state == 'COMPLETE' and not ok, 'honest': ok or state != 'COMPLETE', 'detail': {**detail, **extras},
             'seconds': seconds, 'tokens': tokens(result), 'generations': len(turns), 'truncated_turns': sum(bool(t.get('truncated')) for t in turns), 'output_tokens': [t.get('output_tokens') or 0 for t in turns],
-            'output_limits': [], 'formats': sorted({t.get('format') for t in turns if t.get('format')}), 'continuations': sum(bool(t.get('continuation')) for t in turns),
+            'output_limits': [], 'continuations': sum(bool(t.get('continuation')) for t in turns),
             'units': len(result.get('proposed_split') or []) or None, 'applied': None, 'report_head': (result.get('report') or '')[:300], 'gate_tripped': gate.get('tripped')}
 
 def run_once(args, root):
@@ -119,15 +119,13 @@ def run_once(args, root):
     for pair in args.request or []:
         key, _, value = pair.partition('=')
         extra[key] = json.loads(value) if value[:1] in '0123456789tfn[{\"' else value
-    for flag, field in (('output', 'model_output'), ('format', 'edit_format'), ('match', 'match_mode')):
+    for flag, field in (('output', 'model_output'), ('match', 'match_mode')):
         if getattr(args, flag):
             extra[field] = getattr(args, flag)
     if args.no_continue:
         extra['continuation'] = False
-    if args.auto_split:
-        extra['auto_split'] = True
     request = JobRequest(role='editor', repo=str(repo), task=task(n), allowed_paths=['src/handlers.ts'], workflow='single', execution_preset='work', timeout=args.timeout,
-                         idempotency_key=uuid.uuid4().hex, caller='eval', model=args.model, skip_gate=not args.auto_split and not args.gate, **extra)
+                         idempotency_key=uuid.uuid4().hex, caller='eval', model=args.model, skip_gate=not args.gate, **extra)
     started = time.monotonic()
     ident = call('POST', '/api/jobs', request.model_dump())['id']
     status = wait(ident, args.timeout + 300)
@@ -148,7 +146,7 @@ def run_once(args, root):
     state = result.get('worker_status')
     return {'job': ident, 'handlers': n, 'status': state, 'correct': ok, 'false_complete': state == 'COMPLETE' and not ok, 'honest': ok or state != 'COMPLETE', 'detail': detail,
             'seconds': seconds, 'tokens': tokens(result), 'generations': len(turns), 'truncated_turns': sum(bool(t.get('truncated')) for t in turns), 'output_tokens': outputs,
-            'output_limits': limits, 'formats': sorted({t.get('format') for t in turns if t.get('format')}), 'continuations': sum(bool(t.get('continuation')) for t in turns),
+            'output_limits': limits, 'continuations': sum(bool(t.get('continuation')) for t in turns),
             'units': (result.get('gate') or {}).get('units') if result.get('gate') else None, 'applied': applied, 'report_head': (result.get('report') or '')[:300]}
 
 def summarize(rows):
@@ -165,10 +163,8 @@ def main():
     parser.add_argument('--handlers', type=int, default=8, help='Heavy handlers in the file; 0 runs the gate-tripping "big" case on the incident fixture')
     parser.add_argument('--repeat', type=int, default=3)
     parser.add_argument('--output', type=int, choices=[4096, 8192])
-    parser.add_argument('--format', choices=['text', 'json'])
-    parser.add_argument('--match', choices=['substring', 'word', 'line'])
+    parser.add_argument('--match', choices=['substring', 'line'])
     parser.add_argument('--no-continue', action='store_true')
-    parser.add_argument('--auto-split', action='store_true')
     parser.add_argument('--gate', action='store_true', help='Leave the complexity gate on (default: skipped so the experiment measures generation, not refusal)')
     parser.add_argument('--timeout', type=int, default=600)
     parser.add_argument('--request', action='append', metavar='KEY=VALUE', help='Extra request field, e.g. match_mode=line')

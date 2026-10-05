@@ -6,6 +6,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from .models import Check, JobRequest
 from .settings import CONFIG
+from .testmap import refuse_unfilled
 
 
 class ProjectProfile(BaseModel):
@@ -15,6 +16,7 @@ class ProjectProfile(BaseModel):
     source_files: list[str] = Field(default_factory=list)
     parameter_names: list[str] = Field(default_factory=list)
     groups: dict[str, list[Check]]
+    lsp: dict[str, list[str]] = Field(default_factory=dict)  # language -> argv of a language server this profile approves for Tier-0 code intelligence; none by default
     baseline_notes: list[str] = Field(default_factory=list)
 
 
@@ -68,6 +70,8 @@ def expand_profile(request):
     for group in request.check_groups:
         if group not in p.groups: raise ValueError('Unknown check group: '+group)
         for c in p.groups[group]: add(c)
+    if any(refuse_unfilled(c.argv) for c in selected.values()):
+        raise ValueError('Selected checks include a {tests} template; use recommend_checks to fill it with test paths')
     checks = []
     for c in selected.values():
         data = c.model_dump()

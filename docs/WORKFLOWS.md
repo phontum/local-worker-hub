@@ -510,16 +510,14 @@ instances; Exa remains the fallback. The strict `--verify` loop keeps using Exa.
   decision is saved as `gate.json` (mode `advised`) for calibration and the job runs. `refuse_oversized` refuses before any model call (BLOCKED, `next_action: split_and_resubmit`) with `proposed_split`,
   units grouped by file, at most six changes each, each with a ready-to-submit task; `skip_gate` / `--no-gate` ignores it. It is advisory because, with continuation, a flagged task that Gemma does in
   one shot (the 15-change experiment: 3/3 correct in about 20 s) was being refused for nothing.
-- **Automatic decomposition** (`auto_split` / `--auto-split`, experimental, off by default): a flagged task runs as the gate's units one after another inside one job, each against the file with the earlier
-  units' edits staged, one commit at the end; a unit that does nothing new is fine (the final mapping check still catches omissions). Measured: it did not beat one-shot with continuation (see
-  `benchmarks/RESULTS.md`): units lose what words like "these labels" refer to, and when shown the whole task they start on each other's parts.
+- **Automatic decomposition and the JSON edit format were removed** (measured worse than one-shot with continuation and than the text format; see benchmarks/RESULTS.md, Release 3). The gate still advises and proposes a split.
 - **Workspace chaining** (`continue_from` on `implement_change`, `--continue-from`): a job can start inside an earlier Editor job's private workspace. Its packet and `job.diff` describe only its own change,
   `patch.diff` is cumulative, conflicts are judged against your tree, the earlier job becomes `chained`, and one `apply_result` on the last job writes the whole chain (revalidation runs every job's checks;
   `revert_result` restores from the earliest snapshot; discarding the last job discards the chain).
 - **Match mode** (`match_mode`, default `line`): an exact SEARCH match must cover whole lines (`word` and `substring` are looser). Every one of the 581 recorded SEARCH blocks of earlier runs, and all 120 in the
   runs since, was whole-line aligned, so nothing legitimate is refused; it removes the wrong-place edit where the searched text merely occurs inside something else (`x = 1` inside `max = 1`) and lets a
   stricter match disambiguate. Per-turn alignment counts are recorded in the turn files.
-- **Output cap and format experiments** (`model_output` 8192, `edit_format` json; request fields, not exposed over MCP): neither is on by default. 8K without continuation fixes only tasks between 4K and 8K tokens;
+- **Output cap and format experiments** (`model_output` 8192; a request field, not exposed over MCP): neither is on by default. 8K without continuation fixes only tasks between 4K and 8K tokens;
   with continuation it saves one turn on the largest case (about 5% of the time). The JSON format matched the text format on the heavy workload but lost 6 of 27 editor runs on ordinary small edits.
 - **Deletion, dependencies, revalidation, revert.** `delete_paths` (a subset of `allowed_paths`) lets the model use a `DELETE` block for those files only; a file that disappears otherwise is never applied.
   `apply_result` takes `accept_removals`, `revalidate` (re-runs the approved checks on your tree as it is now plus the patch, in a throwaway copy, and writes nothing if they fail) and `run_checks`
@@ -580,8 +578,18 @@ Deterministic replays of each documented failure live in `tests/test_edit_incide
   of HEAD plus your uncommitted files, so there is no size cap; a plain directory is still copied with the 300 MB cap.
 - **Replay fixtures.** `local-worker incident JOB --fixture DIR` writes the task, the pre-edit files and the raw replies of an Editor job (PRIVATE source: review before committing);
   fixtures placed in `tests/data/incidents/` are replayed by `tests/test_incident_fixtures.py` through the real edit pipeline.
+- **Test selection** (`hub/testmap.py`, MCP `recommend_checks`): ranks test files for changed paths from the import graph (two hops), names (`test_x.py`, `x.test.ts`), symbols the changed files define
+  and recorded failures of earlier real jobs. If the reviewed project profile has a check whose argv holds the single element `{tests}`, the result carries that check filled with validated,
+  indexed test paths only (no option-like or shell-like text); you submit it through `run_checks`. A template can never run unfilled (profile expansion, the runner and `run_check_sync` refuse it), so put such a
+  check in its own profile group. Backtest on this repository's last commits (7 commits that changed both source and tests, mostly 15-20 files each): about half of the tests a commit changed were in the top
+  min(k, n); too few and too large commits to call that a measurement.
+- **Routing advice** (`hub/router.py`, MCP `estimate_delegation`, `GET /api/outcomes` for calibration): hard rules first (Tier 0 lookups and checks, oversized or ambiguous or security-wording tasks and tasks smaller than
+  their handoff stay with the frontier), then a Beta estimate per (role, kind) from the evaluation pass rates at half weight plus your real reviews (benchmark jobs excluded), turned into an expected net saving in relative effort
+  units (a rejected job costs a review plus a share of the task). It is advisory and prior-dominated until you have recorded real reviews with kinds; it is not a trained model.
+- **Layers** (`tests/test_import_boundaries.py`): every module is classified core / coding / research / personal; coding and research may not import each other and skill modules may not import the job machinery.
+  Nothing has been moved yet; the test keeps the boundary from eroding before it is.
 - **Retired.** The Board is refused (`--board`, the dashboard option and the MCP parameter are gone; old board jobs stay viewable); `--agent-loop` is refused for repository roles.
-  `auto_split`, `edit_format=json` and `match_mode=word` are still in the code and are scheduled for removal once `eval_junior` and the incident benchmark can be re-run against the live model.
+  `auto_split`, `edit_format=json` and `match_mode=word` were removed after the post-phase `eval_junior` guard (89.4%, unchanged); requests that set them are refused.
 
 ## Hardware and runtime notes
 

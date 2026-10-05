@@ -124,3 +124,19 @@ def test_naming_helpers():
     assert subwords('parseHTTPResponse_v2') >= {'parse', 'http', 'response'}
     assert stem('retries') == 'retry' and stem('timeouts') == 'timeout' and stem('go') == 'go'
     assert codeindex.TESTISH.search('tests/test_a.py') and codeindex.TESTISH.search('src/a.test.ts') and not codeindex.TESTISH.search('src/contest.py')
+
+def test_nested_functions_and_lazy_imports_are_indexed(tmp_path):
+    import uuid
+    from hub.codeindex import CodeIndex
+    from hub.models import JobRequest
+    from hub.scoped import ScopedFiles
+    root = tmp_path / 'p'
+    root.mkdir()
+    (root / 'util.py').write_text('def tool():\n    return 1\n')
+    (root / 'app.py').write_text('def make():\n    def inner():\n        return tool()\n    class Local:\n        def method(self):\n            return inner()\n    try:\n        from util import tool\n    except ImportError:\n        tool = None\n    return inner\n')
+    index = CodeIndex.load(ScopedFiles(JobRequest(role='investigator', repo=str(root), task='x', idempotency_key=uuid.uuid4().hex)))
+    kinds = {n: k for n, k, _, _ in index.data['app.py']['defs']}
+    assert kinds == {'make': 'function', 'inner': 'function', 'Local': 'class', 'method': 'method'}
+    assert [c['in'] for c in index.callers_of('tool')] == ['inner']  # attributed to the nested function, not the outer one
+    assert [c['in'] for c in index.callers_of('inner')] == ['method']
+    assert index.importers('util.py') == [('app.py', 8)]  # the import inside the function body is an edge

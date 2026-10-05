@@ -598,3 +598,30 @@ Five things were tried on a workload that really overflows the output cap: `benc
   before; the movement from 92.4% is in investigator shapes whose code did not change, so run-to-run variation).
 - Caveats: one model, synthetic fixtures, 3 runs per cell. The heavy workload is a repeated structural change, one kind of overflow; tasks that overflow because they need many different long edits may behave differently.
   The gate thresholds still rest on two real failures.
+
+## Architecture phase 1: regression guard and coder-model comparison — 2026-10-05
+
+**Regression guard after the phase-1 changes** (transactional apply, Tier-0 tools, spec, execution context, Board refusal; service restarted): `eval_junior`, 22 cases x3, Gemma 4 12B, 16K.
+59/66 correct (89.4%), 4 COMPLETE-but-wrong, median 5.7 s, 0 invalid model rows. Same as the previous guard (89.4%) with the same weak shapes: compare 3/6, check_requirement 6/9, regression_test 5/6 (`rt-retry-sleep`).
+The `fix_test` frame context could not move this score: its fixtures (9/9 before and after) are small enough that the whole file already fits the context.
+
+**Free code-specialised models vs Gemma, editor shapes** (mechanical, guard, regression_test, fix_test; 27 runs each, 16K, model per request verified from effective-config events; Gemma's rows are from the guard run above):
+
+| | Gemma 4 12B | qwen2.5-coder 14B (Q4) | qwen2.5-coder 7B |
+| --- | --- | --- | --- |
+| Correct | **26/27 (96%)** | 16/27 (59%) | 16/27 (59%) |
+| COMPLETE but wrong | **0** | 5 | 7 |
+| mechanical / guard / regression_test / fix_test | 6/6, 6/6, 5/6, 9/9 | 3/6, 6/6, 1/6, 6/9 | 4/6, 6/6, 0/6, 6/9 |
+| Median seconds | 4.6 | 4.6 | 3.2 |
+| Local tokens | 34.5k | 22.3k | 25.4k |
+
+- Verdict under the pre-registered rule (a lead of >= 10 points, or fewer false-COMPLETE without losing correctness): **Gemma stays the Editor model**; the coder models trail by 37 points and produce COMPLETE-but-wrong reports (a rename left half done in `mc-rename-pct`, regression tests that do not fail on the bug).
+- Not run: the incident benchmark on the coder models (the decision did not need it), thinking variants, and any other quantization. Two tiny fixtures and 3 repeats: a clear gap, not a general claim about code models.
+- The aliases `coder` and `coder7` stay registered for experiments; no phase uses them. Qwen2.5-coder 14B fits in 12 GB at 16K with the service's existing flash attention and q8 KV cache (no sudo needed).
+
+### Guards after removing auto_split / JSON edits / word matching and indexing nested definitions — 2026-10-05
+
+`eval_junior` (22 cases x3, Gemma 4 12B, 16K): 59/66 correct (89.4%, unchanged), COMPLETE-but-wrong 3 (was 4; all `cmp-reports`), honest 95.5%, median 5.6 s, 0 invalid model rows; the same weak shapes
+(compare 3/6, check_requirement 6/9, regression_test 5/6). `eval_incidents` (3 repeats): 12/12 correct, 0 false-COMPLETE, 0 destructive escapes, 0 partial applications, 0 silent truncations.
+Index changes under test: nested Python functions/classes and imports inside function bodies are indexed (VERSION 4), refreshes come from an in-memory index. One configuration, one run each: no movement, not an improvement.
+`eval_intel` (lexical provider, 7 hand-checked cases on this repository): precision/recall 0.86 -> 1.00 after nested definitions; part of its gold was corrected after the first run, so this is a harness check, not a measurement.

@@ -10,7 +10,7 @@ def test_defaults_and_alias_resolution(tmp_path,monkeypatch):
     monkeypatch.setattr(model_registry,'CONFIG',tmp_path)
     assert model_registry.model_name()=='gemma4:12b-it-qat'
     assert model_registry.resolve('qwen')=={'name':'qwen3.5:9b','num_ctx':16384}
-    assert model_registry.allowed_names()=={'qwen3.5:9b','gemma4:12b-it-qat'}
+    assert model_registry.allowed_names()=={'qwen3.5:9b','gemma4:12b-it-qat','qwen2.5-coder:14b','qwen2.5-coder:7b'}
     with pytest.raises(ValueError):model_registry.resolve('missing')
 
 def test_override_file_is_validated(tmp_path,monkeypatch):
@@ -22,7 +22,7 @@ def test_override_file_is_validated(tmp_path,monkeypatch):
         'Upper':{'name':'ok:1b'},'extra':'not-a-dict'}))
     found=model_registry.models()
     assert found['gemma']['name']=='gemma4:e4b-it-qat' and found['gemma']['num_ctx']==16384
-    assert set(found)=={'qwen','gemma'}
+    assert set(found)=={'qwen','gemma','coder','coder7'}
     (tmp_path/'models.json').write_text('not json')
     assert model_registry.models()['gemma']['name']=='gemma4:12b-it-qat'
 

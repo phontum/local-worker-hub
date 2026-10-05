@@ -28,10 +28,11 @@ files. After two unsuccessful local attempts, take over.
 - `hub/runner.py`, `hub/engine.py`: role workflows and bounded model execution.
 - `hub/codeindex.py`, `hub/workspace.py`, `hub/acceptance.py`, `hub/testparse.py`: deterministic code index and candidate ranking,
   private editor workspace with guarded apply, the acceptance packet, and parsing of test/lint output into failures.
-- `hub/textedit.py`, `hub/jsonedit.py`, `hub/contextpack.py`, `hub/editgate.py`, `hub/mappings.py`, `hub/incident.py`: strict transactional edit protocol (continuation after a cut-off reply, line-anchored
-  matching, an experimental JSON format), context packing for the edit prompt, the advisory complexity gate with proposed split, post-edit `old -> new` verification, and metadata-only incident export.
+- `hub/textedit.py`, `hub/contextpack.py`, `hub/editgate.py`, `hub/mappings.py`, `hub/incident.py`: strict transactional edit protocol (continuation after a cut-off reply, line-anchored
+  matching), context packing for the edit prompt, the advisory complexity gate with proposed split, post-edit `old -> new` verification, and metadata-only incident export.
 - `hub/intel/`, `hub/spec.py`, `hub/execctx.py`, `hub/outcomes.py`: Tier-0 code tools behind a provider interface (CodeIndex today), the DelegationSpec and its host-verified criteria,
-  failure-frame context for `fix_test`, and delegation outcome rows, final frontier diffs and acceptance statistics.
+  failure-frame context for `fix_test`, and delegation outcome rows, final frontier diffs and acceptance statistics. `hub/testmap.py` selects relevant tests and fills approved `{tests}` templates;
+  `hub/router.py` gives advisory Tier 0/1/2 routing. `tests/test_import_boundaries.py` classifies every module into a layer: add new modules there.
 - `hub/scoped.py`, `hub/evidence.py`: scoped tools and freshness/provenance checks.
 - `hub/public_page.py`, `hub/web_provider.py`, `hub/web_verification.py`: public
   retrieval, search-provider adapters and current-source verification.

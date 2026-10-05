@@ -83,7 +83,7 @@ def test_dashboard_chat_flow_options_submission_and_csrf(store,monkeypatch):
         code=c.post('/api/pair-code',headers={'Authorization':'Bearer '+initialize()}).json()['code']
         assert c.post('/api/pair',json={'code':code},headers=origin).status_code==200
         options=c.get('/api/chat-options').json()['models']
-        assert {m['alias']:m['installed'] for m in options}=={'qwen':False,'gemma':True}
+        assert {m['alias']:m['installed'] for m in options}=={'qwen':False,'gemma':True,'coder':False,'coder7':False}
         assert c.post('/api/jobs',json=body).status_code==403  # a browser session needs a same-origin request
         job=c.post('/api/jobs',json=body,headers=origin).json()
         assert job['request']['model']=='qwen' and job['request']['caller']=='dashboard' and len(job['request']['history'])==2

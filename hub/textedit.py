@@ -142,14 +142,14 @@ def alignment(content, i, search):
 
 def apply(content, search, replace, mode='substring', stats=None):
     """Exact unique match first, then a whitespace-tolerant line match with the indentation corrected.
-    `mode` decides which exact matches count: 'substring' (any), 'word' (not through a word) or 'line' (whole lines only); `stats` counts how each match sat."""
+    `mode` decides which exact matches count: 'substring' (any) or 'line' (whole lines only); `stats` counts how each match sat."""
     if search.strip() == '':
         raise ValueError('SEARCH is empty; copy the existing lines you want to change')
     hits = occurrences(content, search)
     if stats is not None:
         for i in hits:
             stats[alignment(content, i, search)] = stats.get(alignment(content, i, search), 0) + 1
-    allowed = {'substring': ('line', 'word', 'inside'), 'word': ('line', 'word'), 'line': ('line',)}[mode]
+    allowed = {'substring': ('line', 'word', 'inside'), 'line': ('line',)}[mode]
     good = [i for i in hits if alignment(content, i, search) in allowed]
     if len(good) == 1:
         return content[:good[0]] + replace + content[good[0] + len(search):]
@@ -228,14 +228,7 @@ class Plan:
     changes: dict  # path -> (lines removed, lines added)
     stats: dict = None  # how exact matches sat in their lines, and how many needed the tolerant path
 
-def already_there(content, replace):
-    """True when a substantial replacement already stands in the file as whole lines, so the change was evidently made by an earlier unit."""
-    if not replace or len(replace.strip()) < 12:
-        return False
-    i = content.find(replace)
-    return i >= 0 and alignment(content, i, replace) == 'line'
-
-def plan(edits, snapshots, allow_shrink=False, deletable=(), mode='substring', lenient=False):
+def plan(edits, snapshots, allow_shrink=False, deletable=(), mode='substring'):
     """Compute every file's new content without writing anything. A file with any failing block contributes errors and no content."""
     errors, contents, changes, grouped, stats = [], {}, {}, {}, {}
     for edit in edits:
@@ -260,9 +253,6 @@ def plan(edits, snapshots, allow_shrink=False, deletable=(), mode='substring', l
             continue
         try:
             for edit in items:
-                if lenient and edit.search is not None and edit.search not in new and already_there(new, edit.replace):
-                    stats['already_applied'] = stats.get('already_applied', 0) + 1  # an earlier unit already made this change
-                    continue
                 if edit.search is None:
                     if content is not None and content.count('\n') > WHOLE_LIMIT:
                         raise ValueError(f'WHOLE replacement is only for files under {WHOLE_LIMIT} lines; use SEARCH/REPLACE blocks')
@@ -278,8 +268,7 @@ def plan(edits, snapshots, allow_shrink=False, deletable=(), mode='substring', l
             errors.append(f'{path}: {error}')
             continue
         if new == content:
-            if not lenient:  # a unit with nothing left to change (an earlier unit did it, or it restated the text) is fine; the final checks catch real omissions
-                errors.append(f'{path}: the blocks did not change anything')
+            errors.append(f'{path}: the blocks did not change anything')
             continue
         if problems:
             errors.extend(dict.fromkeys(problems))

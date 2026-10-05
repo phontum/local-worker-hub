@@ -94,10 +94,14 @@ def analysis_evidence(checks, budget=12000):
     return text[:budget] + '\n[Evidence excerpt is bounded; saved logs are authoritative. Omitted logs were not inspected.]'
 
 
+from .testmap import refuse_unfilled
+
 def run_check_sync(check, root, cap=120):
     """Run one approved check synchronously in `root` (used when a finished job's checks are re-run, which the job runner is not involved in).
     Same argv, working-directory boundary and environment rules as the job runner; checks that need its extra machinery are reported as blocked."""
     result = {'name': check.name, 'exit_code': None, 'timed_out': False, 'status': 'blocked', 'seconds': 0, 'output_tail': '', 'counts': None, 'failures': []}
+    if refuse_unfilled(check.argv):
+        return result | {'reason': 'This check is a test-selection template ({tests}); fill it with recommend_checks first'}
     root = Path(root).resolve()
     cwd = (root / check.cwd).resolve()
     if not cwd.is_dir() or not (cwd == root or root in cwd.parents):

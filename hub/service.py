@@ -279,9 +279,36 @@ def create_app(store=None, start_workers=True):
         try:return intel_tools.run(tool,str(body.get('repo') or ''),{k:v for k,v in body.items() if k!='repo'})
         except (ValueError,OSError) as e:raise HTTPException(409,str(e))
 
+    @app.post('/api/testmap',dependencies=[Depends(auth)])
+    def testmap_recommend(body:dict):
+        """Likely tests for changed files and, when the project profile has a {tests} template check, the concrete approved check to run on them."""
+        from . import testmap
+        from .intel.tools import provider_for
+        from .profiles import load_profile
+        repo=str(body.get('repo') or '');changed=[str(p) for p in body.get('paths') or []][:50]
+        if not changed:raise HTTPException(409,'paths is required')
+        try:index=provider_for(repo).index
+        except (ValueError,OSError) as e:raise HTTPException(409,str(e))
+        templates=[]
+        try:
+            profile,_=load_profile(repo)
+            templates=[c.model_dump() for group in profile.groups.values() for c in group if testmap.PLACEHOLDER in c.argv]
+        except (ValueError,OSError):pass
+        return testmap.recommend(index,changed,templates,testmap.history_from_jobs(store.list(100000)),int(body.get('limit') or 8))
+
+    @app.post('/api/route',dependencies=[Depends(auth)])
+    def route(body:dict):
+        """Advisory tier for a task: Tier 0 (host tools), Tier 1 (local model) or Tier 2 (frontier keeps it), with the reasons and the evidence behind them."""
+        from . import router
+        role=str(body.get('role') or 'editor')
+        if role not in ('investigator','editor','validator'):raise HTTPException(409,'role must be investigator, editor or validator')
+        return router.estimate(role,body.get('kind') or None,str(body.get('task') or ''),int(body.get('files') or 0),store.list(100000),bool(body.get('tier0_answerable')),
+                               bool(body.get('gate_tripped')),bool(body.get('ambiguous_cause')))
+
     @app.get('/api/outcomes',dependencies=[Depends(auth)])
     def outcome_stats(include_eval:bool=False):
-        return {'by_kind':outcomes.stats(store.list(100000),include_eval)}
+        from . import router
+        return {'by_kind':outcomes.stats(store.list(100000),include_eval),'calibration':router.calibration(store.list(100000))}
 
     @app.post('/api/jobs/{ident}/apply',dependencies=[Depends(auth)])
     def apply_result(ident:str,options:ApplyOptions|None=None):

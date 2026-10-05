@@ -165,6 +165,16 @@ def create_server():
         job=call('POST',job_path(job_id)+'/review',review.model_dump())
         return {'id':job['id'],'review':job['review']}
 
+    @server.tool(annotations=READ)
+    def recommend_checks(repo: str, paths: list[str], limit: int=8) -> dict:
+        """Which test files are likely to exercise the changed paths (import graph, naming, mentioned symbols, earlier failures), ranked with reasons, at zero model tokens. When the project's reviewed profile has a check whose argv contains the single element "{tests}", the result also holds that check filled with the validated test paths; submit it through run_checks. Nothing is executed and no command is invented. Treat it as a short list, not proof: run the full suite when unsure."""
+        return call('POST','/api/testmap',{'repo':repo,'paths':paths,'limit':limit})
+
+    @server.tool(annotations=READ)
+    def estimate_delegation(role: str, kind: str | None=None, task: str='', files: int=0, tier0_answerable: bool=False, gate_tripped: bool=False, ambiguous_cause: bool=False) -> dict:
+        """Advice, not a command: whether this task is worth delegating. Returns tier 0 (use the deterministic tools or run_checks), 1 (local model) or 2 (keep it), p_accept (chance you accept the job, from the evaluation prior and your recorded reviews), expected_net_saving in relative effort units (not dollars or tokens) and the rules that applied. With few real reviews the answer is prior-dominated and says so. role is investigator, editor or validator."""
+        return call('POST','/api/route',{'role':role,'kind':kind,'task':task,'files':files,'tier0_answerable':tier0_answerable,'gate_tripped':gate_tripped,'ambiguous_cause':ambiguous_cause})
+
     @server.tool(annotations=WRITE)
     def delegate(repo: str, spec: dict, idempotency_key: str | None=None) -> dict:
         """Submit a structured DelegationSpec: goal, kind, targets [{path, symbol?, lines?}], changes [{description, mappings: [{old, new}]}], invariants and acceptance (criteria: {kind: file_unchanged|symbol_exists|symbol_absent|no_new_files|check_passes|text, ...}; the mechanical kinds are verified by the host after the edit and unmet ones make a COMPLETE job PARTIAL, text ones are listed for you), evidence {job_ids, refs}, scope {read, edit, delete}, checks (approved argv), preset. Editing specs need scope.edit; fix_test and regression_test need a check. It runs the same Investigator/Editor/Validator pipelines as the other tools, so read results and apply_result as usual. The result's request_spec echoes what was understood."""

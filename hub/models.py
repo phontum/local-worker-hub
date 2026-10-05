@@ -39,12 +39,10 @@ class JobRequest(BaseModel):
     investigate_first: bool = False
     in_place: bool = False
     skip_gate: bool = False
-    auto_split: bool = False  # when the complexity gate trips, run the proposed units one after another inside this job instead of refusing
     continuation: bool = True  # after a reply cut off by the output limit, keep its complete blocks staged and ask the model to continue
     model_output: Literal[4096, 8192] | None = None  # editor output cap in tokens (4096 unless set; 8192 is an experiment)
-    edit_format: Literal['text', 'json'] = 'text'
     workspace_from: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')  # continue an earlier Editor job's private workspace
-    match_mode: Literal['substring', 'word', 'line'] = 'line'  # exact SEARCH matches must be whole lines; every recorded model SEARCH was
+    match_mode: Literal['substring', 'line'] = 'line'  # exact SEARCH matches must be whole lines; every recorded model SEARCH was
     refuse_oversized: bool = False  # refuse (rather than only advise on) a task the complexity gate flags; continuation makes refusing unnecessary by default
     kind: Literal['find_code', 'explain', 'config_use', 'compare', 'check_requirement', 'mechanical', 'guard', 'regression_test', 'run_tests', 'fix_test'] | None = None
     model_context: Literal[16384, 32768] | None = None
@@ -79,6 +77,14 @@ class JobRequest(BaseModel):
     model: str | None = Field(default=None, pattern=r'^[a-z][a-z0-9_-]{0,30}$')
     history: list[Turn] = Field(default_factory=list, max_length=6)
     spec: dict | None = None  # the DelegationSpec this job was compiled from (hub.spec); its mechanical criteria are verified after the edit
+
+    @model_validator(mode='before')
+    @classmethod
+    def retired_options(cls, data):
+        if isinstance(data, dict):
+            if data.get('auto_split'): raise ValueError('auto_split was retired: it measured worse than one-shot with continuation. Split the task with the gate\'s proposed_split instead')
+            if data.get('edit_format') == 'json': raise ValueError('The JSON edit format was retired: it measured worse than the text format')
+        return data
 
     @model_validator(mode='after')
     def boundaries(self):

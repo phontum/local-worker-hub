@@ -8,7 +8,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 from .calls import Caller, load_profiles, write_session
 from .codeindex import CodeIndex, format_candidates, mentioned_text, select_ranges
-from . import contextpack, editgate, execctx, jsonedit, mappings
+from . import contextpack, editgate, execctx, mappings
 from .phases import resolve_phase
 from .localize import identifiers, read_ranges, repo_map, search_hits
 from .models import JobRequest
@@ -183,35 +183,33 @@ def staged_diff(snapshots, contents):
     return ''.join(pieces)
 
 MAX_CONTINUATIONS = 5
-MAX_UNITS = 12
 CONTINUE = ('\n\nYour previous reply was cut off by the output limit after {blocks} complete edit block(s). Those edits are already applied in the content below. '
             'Continue with only the changes that are still missing; do not repeat, undo or re-emit edits that are already there. '
             'If every requested change is already in the content, reply with END OF EDITS only.\n\nCurrent content:\n')
 
-def continue_text(blocks, fmt):
-    text = CONTINUE.format(blocks=blocks)
-    return text.replace('reply with END OF EDITS only', 'reply with an empty edits list') if fmt == 'json' else text
+def continue_text(blocks):
+    return CONTINUE.format(blocks=blocks)
 
-def parse_reply(gen, fmt):
-    return jsonedit.parse(gen.text) if fmt == 'json' else textedit.parse(gen.text, require_sentinel=gen.done_reason is None)
+def parse_reply(gen):
+    return textedit.parse(gen.text, require_sentinel=gen.done_reason is None)
 
-def evaluate(gen, view, allow_shrink=False, deletable=(), allow_empty=False, mode='substring', fmt='text', lenient=False):
+def evaluate(gen, view, allow_shrink=False, deletable=(), allow_empty=False, mode='substring'):
     """One complete reply planned in memory against `view`: (Plan, model summary). A cut-off or malformed reply plans nothing."""
     if gen.truncated:
         return textedit.Plan({}, [gen.cut_off_message], {}), ''
-    parsed = parse_reply(gen, fmt)
+    parsed = parse_reply(gen)
     if parsed.problems:
         return textedit.Plan({}, parsed.problems, {}), parsed.summary
     if not parsed.edits:
         return (textedit.Plan({}, [], {}) if allow_empty else textedit.Plan({}, ['No edit blocks were found in the reply'], {})), parsed.summary
-    return textedit.plan(parsed.edits, view, allow_shrink, deletable, mode, lenient), parsed.summary
+    return textedit.plan(parsed.edits, view, allow_shrink, deletable, mode), parsed.summary
 
-def salvage(gen, view, deletable=(), mode='substring', fmt='text', lenient=False):
+def salvage(gen, view, deletable=(), mode='substring'):
     """The complete blocks of a reply that was cut off, planned in memory: (Plan, number of complete blocks). The cut-off block is dropped."""
-    edits = jsonedit.salvage(gen.text) if fmt == 'json' else textedit.parse(gen.text).edits  # text parsing stops at the first unterminated block
+    edits = textedit.parse(gen.text).edits  # parsing stops at the first unterminated block
     if not edits:
         return textedit.Plan({}, [], {}), 0
-    return textedit.plan(edits, view, False, deletable, mode, lenient), len(edits)
+    return textedit.plan(edits, view, False, deletable, mode), len(edits)
 
 async def run_edit(directory, label, prompt, phase='work'):
     request = JobRequest.model_validate_json((directory / 'request.json').read_text())
@@ -229,14 +227,11 @@ async def run_edit(directory, label, prompt, phase='work'):
             prompt = prompt + '\n\n' + failure_text
         thinking = bool(request.model_thinking)
         name = phase if phase in ('edit',) else 'work'
-        system = EDIT_BASE + (jsonedit.format_for(request.delete_paths) if request.edit_format == 'json' else textedit.format_for(request.delete_paths))
+        system = EDIT_BASE + textedit.format_for(request.delete_paths)
         deletable = frozenset(request.delete_paths)
         decision = editgate.decide(request.task, snapshots)
-        units = None
         if decision['tripped'] and not request.skip_gate:
-            if request.auto_split and len(decision['units']) <= MAX_UNITS:
-                units, decision['mode'] = decision['units'], 'auto_split'
-            elif request.refuse_oversized or request.auto_split:
+            if request.refuse_oversized:
                 decision['mode'] = 'refused'
             else:
                 decision['mode'] = 'advised'  # a cut-off reply is continued, so the job runs; the decision is recorded for calibration
@@ -270,9 +265,9 @@ async def run_edit(directory, label, prompt, phase='work'):
                 (directory / 'staged.diff').chmod(0o600)
         def log(gen, planned, unit, continuation=False, blocks=None):
             turns.append({'step': state['step'], 'unit': unit, 'done_reason': gen.done_reason, 'output_tokens': gen.output_tokens, 'limit': gen.limit, 'truncated': gen.truncated,
-                          'continuation': continuation, 'blocks': blocks, 'errors': planned.errors[:8], 'planned_files': sorted(planned.contents), 'format': request.edit_format, 'match': planned.stats or {}})
+                          'continuation': continuation, 'blocks': blocks, 'errors': planned.errors[:8], 'planned_files': sorted(planned.contents), 'match': planned.stats or {}})
         async def generate(text):
-            gen = await caller.generate(name, state['step'], system, text, thinking, jsonedit.JsonReply if request.edit_format == 'json' else None)
+            gen = await caller.generate(name, state['step'], system, text, thinking)
             state['step'] += 1
             return gen
         def pack_for(view, unit_task, header):
@@ -295,7 +290,7 @@ async def run_edit(directory, label, prompt, phase='work'):
                         planned = textedit.Plan({}, [gen.cut_off_message], {})
                         log(gen, planned, index)
                         return planned.errors
-                    planned, blocks = salvage(gen, view, deletable, request.match_mode, request.edit_format, units is not None)
+                    planned, blocks = salvage(gen, view, deletable, request.match_mode)
                     log(gen, planned, index, continuation=continuations > 0, blocks=blocks)
                     if planned.errors:
                         stage(planned.contents)
@@ -309,9 +304,9 @@ async def run_edit(directory, label, prompt, phase='work'):
                     if continuations > MAX_CONTINUATIONS:
                         return [f'The model was still cut off after {MAX_CONTINUATIONS} continuation turns; split the task']
                     redo = pack_for({p: work[p] for p in scope}, unit_task, unit_prompt)
-                    gen = await generate(unit_prompt + continue_text(blocks, request.edit_format) + redo.text)
+                    gen = await generate(unit_prompt + continue_text(blocks) + redo.text)
                     continue
-                planned, hint = evaluate(gen, view, deletable=deletable, allow_empty=continuations > 0 or units is not None, mode=request.match_mode, fmt=request.edit_format, lenient=units is not None)
+                planned, hint = evaluate(gen, view, deletable=deletable, allow_empty=continuations > 0, mode=request.match_mode)
                 log(gen, planned, index, continuation=continuations > 0, blocks=len(planned.contents))
                 state['hint'] = hint or state['hint']
                 stage(planned.contents)
@@ -323,25 +318,15 @@ async def run_edit(directory, label, prompt, phase='work'):
                 correction = unit_prompt + '\n\nYour previous edit blocks could not be applied (nothing was written):\n- ' + '\n- '.join(planned.errors) + '\n\nReply with corrected blocks for these files only. Current content:\n'
                 gen = await generate(correction + pack_for(fresh, unit_task, correction).text)
 
-        errors = []
-        if units is None:
-            errors = await run_unit(request.task, list(snapshots), prompt, 0)
-            state['unit_log'].append({'index': 0, 'files': list(snapshots), 'ok': not errors})
-        else:
-            for index, unit in enumerate(units, 1):
-                shown = unit['task'] + '\n\nFor context, this is part of a larger task (do only your part above, not the rest): ' + request.task
-                unit_errors = await run_unit(unit['task'], unit['allowed_paths'], prompt.replace(request.task, shown, 1), index)
-                state['unit_log'].append({'index': index, 'files': unit['allowed_paths'], 'ok': not unit_errors})
-                if unit_errors:
-                    errors = [f'unit {index} of {len(units)} ({unit["allowed_paths"][0]}): ' + e for e in unit_errors]
-                    break
+        errors = await run_unit(request.task, list(snapshots), prompt, 0)
+        state['unit_log'].append({'index': 0, 'files': list(snapshots), 'ok': not errors})
         changed = []
         if staged and not errors:
             changed, errors = textedit.commit(files, staged, snapshots)
         flush(errors, changed)
-        extra = (f' after {state["continuations"]} continuation turn(s)' if state['continuations'] else '') + (f' in {len(units)} units' if units else '')
+        extra = (f' after {state["continuations"]} continuation turn(s)' if state['continuations'] else '')
         if changed:
-            note = f'Applied {len(changed)} file(s){extra}: ' + ', '.join(changed) + '.' + (f' Model summary: {state["hint"]}' if state['hint'] and not units else '')
+            note = f'Applied {len(changed)} file(s){extra}: ' + ', '.join(changed) + '.' + (f' Model summary: {state["hint"]}' if state['hint'] else '')
         else:
             note = 'No edits were applied' + (f' ({errors[0]})' if errors else '') + '.' + (' Edits that planned cleanly for ' + ', '.join(sorted(staged)) + ' were not written; see staged.diff.' if staged and errors else '')
         status = 'COMPLETE' if changed and not errors else 'PARTIAL'

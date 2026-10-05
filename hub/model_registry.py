@@ -12,6 +12,8 @@ DEFAULT_ALIAS = 'gemma'
 DEFAULTS = {
     'qwen': {'name': 'qwen3.5:9b', 'num_ctx': 16384},
     'gemma': {'name': 'gemma4:12b-it-qat', 'num_ctx': 16384},
+    'coder': {'name': 'qwen2.5-coder:14b', 'num_ctx': 16384},  # benchmark candidate for Editor phases; not a default until it wins benchmarks/eval_junior.py
+    'coder7': {'name': 'qwen2.5-coder:7b', 'num_ctx': 16384},
 }
 CONTEXTS = (16384, 32768)
 OLLAMA = 'http://127.0.0.1:11434'

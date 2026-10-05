@@ -13,6 +13,7 @@ import sys
 import time
 from . import workspace, mappings
 from .evidence import evidence_paths
+from .testmap import refuse_unfilled
 from .acceptance import build as build_acceptance, cumulative, edit_summary, added_tests, context_summary
 from .models import JobRequest, AnswerReview
 from .settings import STATE, PROJECT, MODEL, URL, CONFIG
@@ -193,6 +194,7 @@ class Runner:
 
     async def checks(self,job,request,directory,attempt=0,deadline=None):
         results=[]
+        if any(refuse_unfilled(c.argv) for c in request.checks):raise ValueError('A check still holds the {tests} template placeholder; fill it with recommend_checks before submitting')
         # Approved check programs have their own repository cwd boundary; model read
         # scope is not an OS sandbox for those trusted commands.
         files=ScopedFiles(request.model_copy(update={'read_paths':[]}))
