@@ -4,7 +4,9 @@ function Meter({ value, max = 100 }: { value: number; max?: number }) {
   return <span className="meter"><span style={{ width: `${Math.min(100, Math.max(0, value / max * 100))}%` }} /></span>;
 }
 
-export function StatusBar({ jobs, sample, error, paired, onStats }: { jobs: Job[]; sample?: Sample; error: string; paired: boolean; onStats: () => void }) {
+export type View = 'chat' | 'tasks';
+
+export function StatusBar({ jobs, sample, error, paired, view, onView, onStats }: { jobs: Job[]; sample?: Sample; error: string; paired: boolean; view: View; onView: (view: View) => void; onStats: () => void }) {
   const gpu = sample?.data.gpu;
   const running = jobs.filter(j => j.state === 'running').length, queued = jobs.filter(j => j.state === 'queued').length;
   return <header className="bar">
@@ -17,6 +19,10 @@ export function StatusBar({ jobs, sample, error, paired, onStats }: { jobs: Job[
     </div>}
     <div className="bar-end">
       <span className={`connection ${error ? 'offline' : ''}`}><i />{error ? 'Connection interrupted' : paired ? 'Connected' : 'Pairing required'}</span>
+      {paired && <nav className="views" aria-label="View">
+        <button aria-pressed={view === 'chat'} onClick={() => onView('chat')}>Chat</button>
+        <button aria-pressed={view === 'tasks'} onClick={() => onView('tasks')}>Tasks</button>
+      </nav>}
       {paired && <button onClick={onStats}>Stats</button>}
     </div>
   </header>;

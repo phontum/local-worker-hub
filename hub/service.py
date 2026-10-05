@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from .models import JobRequest, Review
 from .settings import initialize, STATE, PROJECT
-from .model_registry import model_name, allowed_names, OLLAMA
+from .model_registry import model_name, allowed_names, models as registered_models, probe, OLLAMA
 from .store import Store
 from .runner import Runner, stop_process
 from .presentation import result_summary, result_brief, progress_summary, history_item
@@ -265,6 +265,11 @@ def create_app(store=None, start_workers=True):
             if trim and len(data)>trim:data=data[:-trim]
         return {'artifact':name,'offset':offset,'next_offset':offset+len(data),'has_more':more,
                 'text':data.decode('utf-8',errors='replace'),'unit':'bytes'}
+
+    @app.get('/api/chat-options',dependencies=[Depends(auth)])
+    def chat_options():
+        """Registered model aliases for the dashboard chat; `installed` is null when Ollama cannot be asked."""
+        return {'models':[{'alias':alias,'name':value['name'],'installed':probe(value['name'],2).get('installed')} for alias,value in registered_models().items()]}
 
     @app.get('/api/summary',dependencies=[Depends(auth)])
     def summary():return store.summary()

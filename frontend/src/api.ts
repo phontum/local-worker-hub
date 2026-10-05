@@ -4,6 +4,16 @@ export type Check = { name: string; status?: string; exit_code: number | null; t
   counts?: { total: number; passed: number; failed: number; skipped: number } };
 export type Attempt = { attempt: number; edit_status: string; review_status: string; review_findings: string;
   checks: Array<{ name: string; status: string; exit_code: number | null }> };
+export type ProviderLog = { provider: string; args?: Record<string, unknown>; fallback_reason?: string;
+  evidence?: { method: string; requested_url: string; observed_at: string; place?: string; rate_date?: string }; records?: Array<Record<string, unknown>> };
+export type ProductRow = { name: string; brand?: string; variant?: string; price: string | null; price_high?: string | null; currency: string; availability: string;
+  availability_raw?: string; condition?: string; seller?: string; source: string; url: string; link?: string };
+export type Ask = {
+  decision?: { needs_web: boolean; queries: string[]; reply_language: string; route?: string; provider?: string } | null;
+  queries?: string[]; providers?: (string | null)[]; failures?: string[]; provider?: ProviderLog | null; products?: ProductRow[];
+  pages?: Array<{ url: string; kind?: string | null; error?: string | null; observed_at?: string | null; rendered_because?: string; browser_note?: string }>;
+  excerpts?: Array<{ n: number; url: string; title: string; kind: string; observed_at: string }>; used?: number[];
+};
 export type Job = { id: string; state: string; created: number; started: number | null; ended: number | null;
   progress?: { phase: string; queue_position?: number; active_check?: string; elapsed_seconds: number; heartbeat?: number; last_output_at?: number; deadline?: number;
     model_budget_remaining?: number; eta_seconds?: number | null; queue_wait_upper_bound_seconds?: number | null };
@@ -13,13 +23,12 @@ export type Job = { id: string; state: string; created: number; started: number 
   result: { report?: string; answer?: string; error?: string; worker_status?: string; report_valid?: boolean;
     usage?: Record<string, number>; changed_files?: string[]; truncated?: boolean; report_origin?: string; source_job_id?: string;
     metrics?: { queue_seconds: number; check_seconds: number; analysis_seconds: number; execution_seconds: number; recovery_count: number };
-    ask?: { decision?: { needs_web: boolean; queries: string[]; reply_language: string } | null; queries?: string[]; providers?: (string | null)[];
-      failures?: string[]; pages?: Array<{ url: string; kind?: string | null; error?: string | null; observed_at?: string | null }>;
-      excerpts?: Array<{ n: number; url: string; title: string; kind: string; observed_at: string }>; used?: number[] } | null;
+    ask?: Ask | null;
     response_bytes?: number; checks?: Check[]; attempts?: Attempt[]; research_plans?: string[]; board?: Board | null;
     web_verification?: { artifact: string; verified_observations: number; verified_sources?: number; issues: string[] };
     answer_review?: { state: string; initial_status: string; status: string;
       requirements?: Array<{ requirement: string; status: string; evidence: string; evidence_refs?: Array<{ source: string; quote: string }> }> } | null } | null };
+export type ChatOptions = { models: Array<{ alias: string; name: string; installed: boolean | null }> };
 export type ArtifactPage = { text: string; next_offset: number; has_more: boolean };
 export type Event = { id: number; time: number; kind: string; data: Record<string, any> };
 export type Sample = { time: number; data: { cpu_percent: number; ram_used: number; ram_total: number; swap_used: number;
@@ -35,6 +44,9 @@ export async function api<T>(url: string, options?: RequestInit): Promise<T> {
   if (!response.ok) throw new Error(response.status === 401 ? 'pair' : `Request failed (${response.status})`);
   return response.json();
 }
+
+export const checkStatus = (c: Check) => c.status ?? (c.exit_code === 0 ? 'passed' : 'failed');
+export const artifactUrl = (jobId: string, name: string) => `/api/jobs/${jobId}/artifacts/${encodeURIComponent(name)}`;
 
 // 24-hour clock everywhere.
 const clock = { hour: '2-digit', minute: '2-digit', hour12: false } as const;

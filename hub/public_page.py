@@ -66,7 +66,8 @@ class PageText(HTMLParser):
 
 
 
-async def fetch_origin(url, validate_url):
+async def fetch_origin(url, validate_url, html_sink=None):
+    """Read a public page. `html_sink`, a list, receives the raw HTML (bounded by the same size limit) for callers that parse markup."""
     started=time.monotonic();requested=url;redirects=[]
     async with asyncio.timeout(30):
         async with httpx.AsyncClient(transport=transport(),trust_env=False,follow_redirects=False,
@@ -88,6 +89,7 @@ async def fetch_origin(url, validate_url):
                         if len(data)>2_000_000:raise ValueError('Origin page exceeds the evidence size limit')
                     raw=bytes(data).decode(response.encoding or 'utf-8',errors='replace')
                     if 'html' in mime:
+                        if html_sink is not None:html_sink.append(raw)
                         parser=PageText();parser.feed(raw)
                         title=' '.join(parser.title)[:500]
                         text=main_text(raw) or '\n'.join(parser.main or parser.parts)

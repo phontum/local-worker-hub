@@ -159,6 +159,8 @@ def main():
         from .model_registry import models, probe, residency
         result={'model':MODEL,'models':{alias:{**value,**probe(value['name'])} for alias,value in models().items()},'loaded':residency(),'context':16384,'project':str(PROJECT),'state':str(STATE),
             'opencode':shutil.which('opencode'),'ollama':shutil.which('ollama')}
+        from .browser_page import status as browser_status
+        result['browser']=browser_status()
         try:result['opencode_version']=subprocess.check_output(['opencode','--version'],text=True,timeout=10).strip()
         except Exception as e:result['opencode_error']=str(e)
         aws=Path.home()/'.aws'
@@ -195,6 +197,7 @@ def main():
     p.add_argument('--profile-hash');p.add_argument('--check-group',action='append',default=[])
     p.add_argument('--profile-ref');p.add_argument('--workflow',choices=['single','implement'],default='single')
     p.add_argument('--repair-attempts',type=int,default=0);p.add_argument('--investigate-first',action='store_true')
+    p.add_argument('--model',help='Local model alias from the registry for every phase of this job (default: roles.json)')
     p.add_argument('--model-context',type=int,choices=[16384,32768]);p.add_argument('--model-thinking',choices=['on','off'])
     p.add_argument('--board',action='store_true',help='Rarely useful: deliberate with an anonymous multi-model board before answering (public web roles; 300s budget, slower)')
     p.add_argument('--agent-loop',dest='agent_loop',action='store_true',help='Use the older model-driven tool loop instead of the host pipelines (for comparison)')
@@ -224,7 +227,7 @@ def main():
             idempotency_key=args.idempotency_key or uuid.uuid4().hex,summary_mode=args.summary_mode,failure_policy=args.failure_policy,
             profile_hash=args.profile_hash,profile_ref=args.profile_ref,check_groups=args.check_group,parameters=parameters,
             workflow=args.workflow,repair_attempts=args.repair_attempts,investigate_first=args.investigate_first,
-            model_context=args.model_context,model_thinking=None if args.model_thinking is None else args.model_thinking=='on',
+            model=args.model,model_context=args.model_context,model_thinking=None if args.model_thinking is None else args.model_thinking=='on',
             execution_preset=preset,review_pass=args.review_pass,read_paths=args.read_path,evidence_job_ids=args.evidence_job,handoff_id=args.handoff_id,board=args.board,board_mode=args.board_mode,verify=args.verify,agent_loop=args.agent_loop)
     except Exception as e:p.error(str(e))
     ident=None

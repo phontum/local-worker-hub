@@ -12,7 +12,7 @@ export function StatsDrawer({ summary, sample, history, onClose }: { summary: Su
         <div><span>Frontier tokens avoided</span><b>{count(summary?.estimated_frontier_tokens_avoided)}</b></div></div>
       <p className="muted">Matched baselines: {summary?.matched_baselines ?? 0} · avoided {dollars(summary?.estimated_frontier_cost_avoided)}. API equivalents are not subscription savings.</p>
       <h3>Hardware</h3>
-      {history.length > 1 ? <svg role="img" aria-label="GPU utilization, last 60 samples" viewBox="0 0 300 52" width="100%" height="52"><polyline points={points} fill="none" stroke="#247456" strokeWidth="2" /></svg> : <p className="muted">GPU history needs two samples.</p>}
+      {history.length > 1 ? <svg role="img" aria-label="GPU utilization, last 60 samples" viewBox="0 0 300 52" width="100%" height="52"><polyline points={points} fill="none" stroke="var(--accent)" strokeWidth="2" /></svg> : <p className="muted">GPU history needs two samples.</p>}
       <p className="muted">{gpu ? `${gpu.name} · ${gpu.temperature_c}°C · ${gpu.power_w.toFixed(0)} W` : 'GPU metrics unavailable'} · CPU {sample?.data.cpu_percent ?? '—'}% · swap {sample ? gb(sample.data.swap_used) : '—'}</p>
       <h3>Workflow results</h3>
       {Object.entries(summary?.role_stats ?? {}).map(([role, s]) => <p key={role}>{role}: {s.accepted}/{s.jobs} accepted · {s.completed} complete · {s.takeovers} takeovers · {s.repair_attempts} repairs</p>)}

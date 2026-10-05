@@ -28,7 +28,9 @@ files. After two unsuccessful local attempts, take over.
 - `hub/runner.py`, `hub/engine.py`: role workflows and bounded model execution.
 - `hub/scoped.py`, `hub/evidence.py`: scoped tools and freshness/provenance checks.
 - `hub/public_page.py`, `hub/web_provider.py`, `hub/web_verification.py`: public
-  retrieval, provider adapters and current-source verification.
+  retrieval, search-provider adapters and current-source verification.
+- `hub/providers/`: structured data providers (weather, fx, clock) the ask decision can choose;
+  `hub/product_extract.py`: JSON-LD/microdata/meta product parsing; `hub/web_fixtures.py`: eval record/replay.
 - `hub/answer_review.py`, `hub/report.py`: requirements review and report contract.
 - `hub/validation.py`, `hub/profiles.py`: approved argv checks and private profiles.
 - `hub/install.py`, `hub/settings.py`: installation and private locations.

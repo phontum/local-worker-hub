@@ -67,3 +67,23 @@ def test_streamed_ollama_error_is_bounded_and_visible_only_in_private_events(sto
         assert c.get('/api/jobs/'+job['id']+'/events').status_code==401
     errors=[e for e in store.all_events(job['id']) if e['kind']=='inference-error']
     assert errors[0]['data']=={'upstream_status':500,'message':'model output parsing failed'}
+
+def test_dashboard_chat_flow_options_submission_and_csrf(store,monkeypatch):
+    import hub.service as service
+    monkeypatch.setattr(service,'probe',lambda name,timeout=5:{'installed':name.startswith('gemma')})
+    origin={'Origin':'http://127.0.0.1:8765'}
+    # The body the dashboard's jobBody() builds for Extended mode, qwen, thinking off, review on, with one earlier exchange.
+    body={'role':'personal','task':'and tomorrow?','execution_preset':'extended','timeout':300,'caller':'dashboard','idempotency_key':'chat-1','model':'qwen',
+          'model_context':32768,'model_thinking':False,'review_pass':True,
+          'history':[{'role':'user','text':'Weather in Oslo?'},{'role':'assistant','text':'12 °C'}]}
+    with TestClient(create_app(store,start_workers=False),base_url='http://127.0.0.1:8765') as c:
+        assert c.get('/api/chat-options').status_code==401
+        code=c.post('/api/pair-code',headers={'Authorization':'Bearer '+initialize()}).json()['code']
+        assert c.post('/api/pair',json={'code':code},headers=origin).status_code==200
+        options=c.get('/api/chat-options').json()['models']
+        assert {m['alias']:m['installed'] for m in options}=={'qwen':False,'gemma':True}
+        assert c.post('/api/jobs',json=body).status_code==403  # a browser session needs a same-origin request
+        job=c.post('/api/jobs',json=body,headers=origin).json()
+        assert job['request']['model']=='qwen' and job['request']['caller']=='dashboard' and len(job['request']['history'])==2
+        assert c.post('/api/jobs',json={**body,'idempotency_key':'chat-2','model':'gpt-9'},headers=origin).status_code==422
+        assert c.post('/api/jobs',json={**body,'idempotency_key':'chat-3','context':'private notes'},headers=origin).status_code==422

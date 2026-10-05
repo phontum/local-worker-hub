@@ -391,8 +391,10 @@ schema-constrained decision and then reads and writes text.
 
 **Ask (Personal and Researcher)**, `hub/ask.py`:
 
-1. Decide (one JSON call): does this need the web, up to two search queries, the reply language.
-2. Search (`hub/retrieval.py`): SearXNG, then Exa, then LangSearch, with every fallback reported.
+1. Decide (one JSON call): does this need the web, up to two search queries, the reply language, and optionally a
+   structured provider with its arguments (see below). A follow-up chat message also sees up to six earlier turns.
+2. Search (`hub/retrieval.py`): the configured provider first, then the others, with every fallback reported and any provider failure
+   isolated (a rate limit never ends the job). With SearXNG chosen the order is SearXNG, LangSearch, Exa; with Exa, Exa then LangSearch.
 3. Read the best three pages live through the DNS-pinned origin reader. Main text is extracted with trafilatura.
    A page that cannot be read falls back to a labelled third-party copy, or to its search snippet.
 4. Rank 900-character passages with BM25 and give the model numbered excerpts with their kind and read time.
@@ -406,6 +408,48 @@ Typical time is 10-20 s. COMPLETE when the model answered; PARTIAL when the sour
 `--extended` gives the answer step 32K and thinking, without the strict reviewer. `--verify` keeps the older strict
 research loop with origin-proof quotes; `--review` adds the independent requirements review. `--agent-loop` uses
 the older model-driven tool loop, for comparison.
+
+**Structured providers**, `hub/providers/`: for questions with an exact public data source the decide call can pick a
+provider instead of a web search. `weather` (Open-Meteo: geocoding, current conditions and an hourly table for the day and
+hours asked about, in the preferred units; an ambiguous place name is flagged in the data so the answer states which
+place it used), `fx` (Frankfurter, European Central Bank reference rates; about 30 major currencies, no RSD; the host does
+the arithmetic) and `clock` (local, no network: current time in up to three IANA zones). Provider data becomes a
+numbered excerpt of kind `provider`, answered and cited like any page; the source shown is the provider's site and the
+exact API request is kept in `ask.json` under `retrieval.provider`. Requests go through the same DNS-pinned public-only
+transport and carry only a place, currency codes or time zones. If a provider fails, has no arguments or finds no result,
+the pipeline falls back to web search and records why. `~/.config/local-worker/providers.json` with
+`{"disabled": ["fx"]}` turns providers off. The strict `--verify` loop does not use providers.
+
+**Pages that need JavaScript**, `hub/browser_page.py`: after the plain origin read, a page whose text is thin, whose HTML says to
+enable JavaScript, or whose app root is empty is rendered in a locked-down Chromium (Playwright; `local-worker doctor` shows
+whether it is installed). The browser never touches the network itself: every request it makes is re-issued by the same
+DNS-pinned public-only client (redirects are validated hop by hop), only GET/HEAD for documents, scripts, stylesheets and
+fetch/XHR are served, images, fonts, downloads, popups, service workers and cookies are off, and it is launched with a proxy that
+is a local listener which only counts and closes connections, so a WebSocket or anything else that escapes interception fails
+closed and is reported as `escaped_connections`. Limits: 60 requests, 2 MB per document, 1.5 MB per subresource, 6 MB and 20 s in
+total, one browser at a time. Because the site still sees our client, rendering helps with JavaScript-only content and does
+not help with sites that refuse the client (403), so those are not retried in the browser. Evidence has method
+`origin-browser` and `javascript_rendered: true`. `~/.config/local-worker/browser.json` with `{"mode": "off"}` disables it and
+`"always"` renders every page. The strict `--verify` loop does not use the browser: pages that need JavaScript stay unverified there.
+
+**Product data**, `hub/product_extract.py`: JSON-LD, schema.org microdata and `product:price` meta tags are parsed on the host
+(price as a decimal, ISO currency, availability, condition, seller, variant) and shown to the model as a host-written
+`PRODUCT DATA` excerpt before the page text; the text stays visible, so a "sold out" banner next to an InStock offer is reported
+as a conflict. Markup values are single-line and bounded before they reach the prompt.
+
+**Dashboard chat**: the Chat view posts ordinary Personal jobs (`caller: dashboard`) from the paired browser, so every reply
+is inspectable under Tasks. Its settings panel covers mode (small/work/extended preset), model (`model` on the request,
+any registry alias, applied to every phase; `--model` in the CLI), context, thinking, review, strict verify, the older
+tool loop and the board, rejects combinations the hub would refuse, and shows the equivalent `local-worker` command.
+Earlier turns travel in the request's bounded `history` (six turns, 800 characters each; public web roles only), not in
+`context`, which Personal still refuses. The conversation and settings are kept in the browser's local storage only.
+Browser mutations require a same-origin request, so use the built dashboard, not `npm run dev` on another port.
+
+**Replayable evaluation**: `benchmarks/eval_small.py --web record` stores search results, page text and provider
+responses under the private state directory, and `--web replay` serves them back without network, so only the model
+varies (`hub/web_fixtures.py`). The harness writes `~/.config/local-worker/web-fixtures.json` (with an expiry) for the
+run, because job processes start with a minimal environment, and restores it afterwards. Job processes load `hub/` code
+per job: do not edit it during a run.
 
 `~/.config/local-worker/preferences.json` (optional): `{"units": "metric", "clock": "24h", "timezone": "Europe/Belgrade"}`.
 

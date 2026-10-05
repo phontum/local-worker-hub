@@ -2,13 +2,17 @@
 
 Mechanical checks only (expected strings, web use, units, fabricated links). Current facts still need a human or
 frontier look at the saved answers and sources. Results go to private hub state, never into the repository.
-Usage: .venv/bin/python benchmarks/eval_small.py [--model gemma|qwen] [--groups personal lookup fixtures]
+Usage: .venv/bin/python benchmarks/eval_small.py [--model gemma|qwen] [--groups personal lookup fixtures] [--repeat N] [--category C ...]
+Personal cases live in benchmarks/evals/personal.jsonl. For a repeatable web, run once with
+--web record, then --web replay (same --fixture-set): search results and pages are stored under the state directory and served
+back, so only the model varies (hub/web_fixtures.py). The harness writes CONFIG/web-fixtures.json for the run and restores it.
 """
 import argparse
 import json
 import os
 import re
 import shutil
+import signal
 import sys
 import time
 import uuid
@@ -20,21 +24,12 @@ from hub.models import JobRequest
 from hub.settings import CONFIG, STATE
 
 REPO = str(Path(__file__).resolve().parents[1])
-# id, task, needs web (None = either), regexes that must match the answer (empty = graded by hand), case-insensitive
-PERSONAL = [
-    ('fact-wall', 'In which year did the Berlin Wall fall?', None, [r'1989']),
-    ('fact-novel', "Who wrote the novel 'The Master and Margarita'?", None, [r'Bulgakov']),
-    ('fact-fahrenheit', 'What is the boiling point of water at sea level in degrees Fahrenheit?', None, [r'212']),
-    ('fact-capital', 'What is the capital of Australia?', None, [r'Canberra']),
-    ('now-weather-ns', "What's the weather in Novi Sad today? I want to be outside from 15:00 to 20:00.", True, []),
-    ('now-weather-msk', 'Какая сейчас погода в Москве?', True, []),
-    ('now-price-gpu', 'What is the cheapest brand new RTX 5070 in Serbia right now? It must be in stock.', True, []),
-    ('now-python', 'What is the latest stable Python 3 release?', True, []),
-    ('lang-sr-time', 'Koliko je sada sati u Tokiju?', None, []),
-    ('lang-de-fact', 'Wie hoch ist die Zugspitze?', None, [r'2[ .,]?96\d']),
-    ('chat-hello', 'Hello! How are you today?', False, []),
-    ('chat-clarify', "What's the weather like?", False, []),
-]
+CASES = Path(__file__).parent / 'evals' / 'personal.jsonl'
+
+def load_cases(categories=None):
+    cases = [json.loads(line) for line in CASES.read_text().splitlines() if line.strip()]
+    return [c for c in cases if not categories or c['category'] in categories]
+
 LOOKUPS = [
     ('DEFAULT_ALIAS', 'Where is DEFAULT_ALIAS defined in this repository and what is its value? Return path:line.', ['hub/model_registry.py'], r'gemma'),
     ('LOW_MEMORY_MB', 'Where is the default low-memory threshold LOW_MEMORY_MB defined and what is the default in MB? Return path:line.', ['hub/service.py', 'hub/cli.py'], r'2500'),
@@ -45,7 +40,7 @@ LOOKUPS = [
 ]
 UNITS = re.compile(r'-?\d+(?:\.\d+)?\s?°\s?F\b|\b\d+(?:\.\d+)?\s?mph\b|\b\d+(?:\.\d+)?\s?miles?\b|\b(?:1[0-2]|0?[1-9])(?::[0-5]\d)?\s?[ap]\.?m\.?(?![\w-])', re.I)
 OVERRIDE_KEYS = ('personal', 'researcher', 'investigator', 'editor', 'investigate', 'review', 'answer_review',
-                 'ask-decide', 'ask-answer', 'localize', 'investigate-answer', 'textedit')
+                 'ask-decide', 'ask-answer', 'localize', 'investigate-answer')
 
 def wait(ident, limit):
     started = time.monotonic()
@@ -74,21 +69,53 @@ def run_job(request, limit):
     status = wait(ident, limit)
     return ident, status, call('GET', f'/api/jobs/{ident}/result?view=summary') or {}, round(time.monotonic() - started, 1)
 
-def personal(rows):
-    for key, task, web, expected in PERSONAL:
-        request = JobRequest(role='personal', task=task, execution_preset='work', timeout=120, idempotency_key=uuid.uuid4().hex, caller='eval')
-        ident, status, result, seconds = run_job(request, 240)
-        answer = result.get('answer') or result.get('report') or result.get('error') or ''
-        searches, fetches = web_counts(ident)
-        seen = observed_text(ident)
-        links = re.findall(r'https?://[^\s)\]>,]+', answer)
-        fabricated = [u for u in links if u.rstrip('.') not in seen]
-        rows.append({'group': 'personal', 'id': key, 'job': ident, 'seconds': seconds, 'state': status['state'], 'status': result.get('worker_status'),
-                     'searches': searches, 'fetches': fetches, 'web_ok': web is None or (web == bool(searches)),
-                     'expected_ok': all(re.search(p, answer, re.I) for p in expected) if expected else None,
-                     'units_ok': not UNITS.search(answer) or key == 'fact-fahrenheit', 'fabricated_links': fabricated,
-                     'answer': answer[:1200]})
-        print(json.dumps({k: rows[-1][k] for k in ('id', 'seconds', 'status', 'searches', 'fetches', 'web_ok', 'expected_ok', 'units_ok', 'fabricated_links')}), flush=True)
+def actual_route(ident):
+    """What the ask pipeline decided, from the job's saved ask.json (older records only have needs_web)."""
+    path = STATE / 'jobs' / ident / 'ask.json'
+    if not path.exists():
+        return None
+    decision = json.loads(path.read_text()).get('decision') or {}
+    if decision.get('route'):
+        return decision['route'] if decision['route'] != 'provider' else 'provider:' + str(decision.get('provider'))
+    return 'web' if decision.get('needs_web') else 'direct'
+
+def fixture_misses(ident):
+    """Searches in a replay run that found no recorded fixture (the model asked for a query that was never recorded)."""
+    path = STATE / 'jobs' / ident / 'tools.jsonl'
+    if not path.exists():
+        return 0
+    events = (json.loads(line) for line in path.read_text().splitlines() if line.strip())
+    return sum(1 for e in events if e['kind'] == 'web_search' and e['data'].get('fallback_reason') == 'fixture miss')
+
+def route_ok(expected, actual, coarse):
+    """Exact match; coarse accepts web for a provider case, so the baseline before providers exist stays comparable."""
+    if actual is None:
+        return False
+    if expected == actual:
+        return True
+    return coarse and expected.startswith('provider:') and actual == 'web'
+
+def personal(rows, repeat, categories):
+    for case in load_cases(categories):
+        for attempt in range(repeat):
+            request = JobRequest(role='personal', task=case['task'], execution_preset='work', timeout=120, idempotency_key=uuid.uuid4().hex, caller='eval')
+            ident, status, result, seconds = run_job(request, 240)
+            answer = result.get('answer') or result.get('report') or result.get('error') or ''
+            searches, fetches = web_counts(ident)
+            seen = observed_text(ident)
+            links = re.findall(r'https?://[^\s)\]>,]+', answer)
+            fabricated = [u for u in links if u.rstrip('.') not in seen]
+            route = actual_route(ident)
+            checks = [bool(re.search(p, answer, re.I)) for p in case['must_match']]
+            forbidden = [p for p in case['must_not_match'] if re.search(p, answer, re.I)]
+            rows.append({'group': 'personal', 'id': case['id'], 'category': case['category'], 'attempt': attempt, 'job': ident, 'seconds': seconds,
+                         'state': status['state'], 'status': result.get('worker_status'), 'route': route, 'expect_route': case['expect_route'],
+                         'route_exact': route_ok(case['expect_route'], route, False), 'route_coarse': route_ok(case['expect_route'], route, True),
+                         'searches': searches, 'fetches': fetches, 'fixture_misses': fixture_misses(ident), 'requires_current': case['requires_current'],
+                         'expected_ok': all(checks) if checks else None, 'forbidden_hits': forbidden,
+                         'units_ok': not UNITS.search(answer) or case['category'] == 'units' or case['id'] == 'fact-boil-f', 'fabricated_links': fabricated,
+                         'answer': answer[:1200]})
+            print(json.dumps({k: rows[-1][k] for k in ('id', 'attempt', 'seconds', 'status', 'route', 'route_exact', 'expected_ok', 'units_ok', 'fabricated_links')}), flush=True)
 
 def lookups(rows):
     for key, task, paths, value in LOOKUPS:
@@ -107,15 +134,26 @@ def fixtures(rows, root):
                      'status': row['worker_status'], 'correct': row['mechanically_correct']})
         print(json.dumps({k: rows[-1][k] for k in ('id', 'seconds', 'status', 'correct')}), flush=True)
 
+def rate(values):
+    values = list(values)
+    return f"{sum(bool(v) for v in values)}/{len(values)}"
+
 def summary(rows):
     out = {}
     p = [r for r in rows if r['group'] == 'personal']
     if p:
         times = sorted(r['seconds'] for r in p)
-        out['personal'] = {'n': len(p), 'median_seconds': times[len(times) // 2], 'web_ok': sum(r['web_ok'] for r in p),
-                           'expected_ok': f"{sum(1 for r in p if r['expected_ok'])}/{sum(1 for r in p if r['expected_ok'] is not None)}",
-                           'units_ok': sum(r['units_ok'] for r in p), 'fabricated': sum(bool(r['fabricated_links']) for r in p),
-                           'complete': sum(r['status'] == 'COMPLETE' for r in p)}
+        graded = [r for r in p if r['expected_ok'] is not None]
+        out['personal'] = {'runs': len(p), 'cases': len({r['id'] for r in p}), 'median_seconds': times[len(times) // 2],
+                           'route_exact': rate(r['route_exact'] for r in p), 'route_coarse': rate(r['route_coarse'] for r in p),
+                           'expected_ok': rate(r['expected_ok'] for r in graded), 'forbidden_free': rate(not r['forbidden_hits'] for r in p),
+                           'units_ok': rate(r['units_ok'] for r in p), 'no_fabricated_links': rate(not r['fabricated_links'] for r in p),
+                           'complete': rate(r['status'] == 'COMPLETE' for r in p), 'fixture_misses': sum(r['fixture_misses'] for r in p),
+                           'by_category': {c: {'route_exact': rate(r['route_exact'] for r in p if r['category'] == c),
+                                               'expected_ok': rate(r['expected_ok'] for r in graded if r['category'] == c)}
+                                           for c in sorted({r['category'] for r in p})},
+                           'flaky_cases': sorted(i for i in {r['id'] for r in p}
+                                                 if len({(r['route'], r['expected_ok']) for r in p if r['id'] == i}) > 1)}
     lk = [r for r in rows if r['group'] == 'lookup']
     if lk:
         out['lookup'] = {'n': len(lk), 'path_ok': sum(r['path_ok'] for r in lk), 'value_ok': sum(r['value_ok'] for r in lk),
@@ -130,6 +168,10 @@ def main():
     parser.add_argument('--model', choices=['gemma', 'qwen'], help='Temporarily select this model for every role (roles.json is restored afterwards)')
     parser.add_argument('--groups', nargs='+', choices=['personal', 'lookup', 'fixtures'], default=['personal', 'lookup', 'fixtures'])
     parser.add_argument('--label', default='')
+    parser.add_argument('--web', choices=['record', 'replay'], help='Record live web results into a fixture set, or replay them without network')
+    parser.add_argument('--fixture-set', default='baseline', help='Name of the fixture set under the state directory (default: baseline)')
+    parser.add_argument('--repeat', type=int, default=3, help='Runs per personal case; pass rates, not single runs')
+    parser.add_argument('--category', nargs='+', help='Only these personal categories')
     args = parser.parse_args()
     root = STATE / 'benchmarks' / ('eval-small-' + time.strftime('%Y%m%d-%H%M%S') + ('-' + args.label if args.label else ''))
     root.mkdir(parents=True, mode=0o700)
@@ -142,9 +184,14 @@ def main():
         for key in OVERRIDE_KEYS:
             profiles.setdefault(key, {})['model'] = args.model
         roles.write_text(json.dumps(profiles, indent=2))
+    fixtures_file = CONFIG / 'web-fixtures.json'
+    previous = fixtures_file.read_text() if fixtures_file.exists() else None
+    if args.web:
+        fixtures_file.write_text(json.dumps({'mode': args.web, 'dir': str(STATE / 'benchmarks' / ('web-fixtures-' + args.fixture_set)), 'expires': time.time() + 6 * 3600}))
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))  # run the finally block so the fixture config and roles.json are restored
     rows = []
     try:
-        if 'personal' in args.groups: personal(rows)
+        if 'personal' in args.groups: personal(rows, args.repeat, args.category)
         if 'lookup' in args.groups: lookups(rows)
         if 'fixtures' in args.groups:
             sys.path.insert(0, str(Path(__file__).parent))
@@ -152,7 +199,9 @@ def main():
     finally:
         if args.model:
             shutil.copyfile(backup, roles)
-        (root / 'results.json').write_text(json.dumps({'model': args.model or 'default', 'rows': rows, 'summary': summary(rows)}, indent=2, ensure_ascii=False))
+        if args.web:
+            fixtures_file.write_text(previous) if previous is not None else fixtures_file.unlink(missing_ok=True)
+        (root / 'results.json').write_text(json.dumps({'model': args.model or 'default', 'web_fixtures': args.web and f'{args.web}:{args.fixture_set}', 'repeat': args.repeat, 'rows': rows, 'summary': summary(rows)}, indent=2, ensure_ascii=False))
     print(json.dumps(summary(rows), indent=2))
     print('Evidence:', root)
 

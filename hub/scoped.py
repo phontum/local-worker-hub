@@ -311,16 +311,31 @@ class Research:
             raise ScopeError('Hosted public tool requires unsupported parameters')
         return result
 
-    async def call(self,name,args):
+    @staticmethod
+    def provider_error(error):
+        """Map a raw Exa/MCP failure to ProviderUnavailable (try the next provider) or ScopeError; anything else comes back unchanged."""
         from .web_provider import ProviderUnavailable
         import httpx
-        try:return await self.exa_call(name,args)
-        except TimeoutError:raise ProviderUnavailable('Exa public tool timed out') from None
-        except httpx.TransportError:raise ProviderUnavailable('Exa public transport unavailable') from None
-        except httpx.HTTPStatusError as error:
+        if isinstance(error,TimeoutError):return ProviderUnavailable('Exa public tool timed out')
+        if isinstance(error,httpx.TransportError):return ProviderUnavailable('Exa public transport unavailable')
+        if isinstance(error,httpx.HTTPStatusError):
             code=error.response.status_code
-            if code==429 or code>=500:raise ProviderUnavailable(f'Exa public tool HTTP {code}') from None
-            raise ScopeError(f'Exa public tool HTTP {code}') from None
+            return ProviderUnavailable(f'Exa public tool HTTP {code}') if code==429 or code>=500 else ScopeError(f'Exa public tool HTTP {code}')
+        return error
+
+    async def call(self,name,args):
+        try:return await self.exa_call(name,args)
+        except BaseExceptionGroup as group:
+            # The MCP client runs inside an anyio task group, which wraps every error raised in it (a rate limit, a timeout)
+            # in an ExceptionGroup that no handler for the inner type would catch.
+            error=group
+            while isinstance(error,BaseExceptionGroup) and error.exceptions:error=error.exceptions[0]
+            if not isinstance(error,Exception):raise  # cancellation and exit signals pass through untouched
+            raise self.provider_error(error) from None
+        except Exception as error:
+            mapped=self.provider_error(error)
+            if mapped is error:raise
+            raise mapped from None
 
     async def exa_call(self,name,args):
         url='https://mcp.exa.ai/mcp?tools=web_search_exa,web_fetch_exa'
