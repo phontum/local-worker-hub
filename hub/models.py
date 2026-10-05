@@ -78,6 +78,7 @@ class JobRequest(BaseModel):
     agent_loop: bool = False
     model: str | None = Field(default=None, pattern=r'^[a-z][a-z0-9_-]{0,30}$')
     history: list[Turn] = Field(default_factory=list, max_length=6)
+    spec: dict | None = None  # the DelegationSpec this job was compiled from (hub.spec); its mechanical criteria are verified after the edit
 
     @model_validator(mode='after')
     def boundaries(self):
@@ -93,6 +94,7 @@ class JobRequest(BaseModel):
             if self.role not in ('personal', 'researcher'): raise ValueError('Board deliberation is available for public web roles only in this version')
             if self.execution_preset in ('small', 'extended') or self.model_context == 32768:
                 raise ValueError('Board phases use fixed 16K contexts; omit small/extended presets and 32K context')
+        if self.spec is not None and len(str(self.spec)) > 60_000: raise ValueError('spec is too large')
         if not self.task.strip(): raise ValueError('Task is empty')
         if self.role not in ('researcher', 'personal'):
             if not self.repo: raise ValueError('This role requires an explicit repository')
@@ -218,12 +220,12 @@ class AnswerReview(BaseModel):
         elif self.status == 'COMPLETE':self.status = 'PARTIAL'
         return self
 
-REVIEW_REASONS = ('truncated', 'wrong_edit', 'oversized', 'no_change', 'check_failed', 'scope', 'other')
+REVIEW_REASONS = ('truncated', 'wrong_edit', 'oversized', 'no_change', 'check_failed', 'scope', 'wrong_localization', 'context_missing', 'other')
 
 class Review(BaseModel):
     decision: Literal['accepted', 'rejected', 'takeover']
     notes: str = Field(default='', max_length=4000)
-    reason: Literal['truncated', 'wrong_edit', 'oversized', 'no_change', 'check_failed', 'scope', 'other'] | None = None
+    reason: Literal['truncated', 'wrong_edit', 'oversized', 'no_change', 'check_failed', 'scope', 'wrong_localization', 'context_missing', 'other'] | None = None
     baseline_frontier_tokens: int | None = Field(default=None, ge=0)
     delegated_frontier_tokens: int | None = Field(default=None, ge=0)
     baseline_frontier_cost: float | None = Field(default=None, ge=0)
@@ -235,8 +237,8 @@ class Review(BaseModel):
     @model_validator(mode='after')
     def say_why(self):
         # A rejection or takeover with no reason cannot become a regression case; require it on input (stored reviews are untouched).
-        if self.decision in ('rejected', 'takeover') and len(self.notes.strip()) < 10:
-            raise ValueError('A rejected or takeover review needs notes (at least 10 characters) saying what went wrong, and ideally a reason: ' + ', '.join(REVIEW_REASONS))
+        if self.decision in ('rejected', 'takeover') and (len(self.notes.strip()) < 10 or not self.reason):
+            raise ValueError('A rejected or takeover review needs notes (at least 10 characters) saying what went wrong and a reason code: ' + ', '.join(REVIEW_REASONS))
         return self
 
 

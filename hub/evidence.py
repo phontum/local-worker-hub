@@ -45,3 +45,14 @@ class EvidenceReader:
                'next_offset':offset+len(data),'has_more':more}
         self.audit('check_read',value)
         return json.dumps(value)
+
+PATH_REF=re.compile(r'(?<![\w./-])((?:[\w.-]+/)*[\w.-]+\.[A-Za-z0-9]{1,6}):\d+')
+
+def evidence_paths(store, request):
+    """Repository files cited as path:line in the reports of attached evidence jobs; the editor's patch may rest on them, so apply tracks their hashes."""
+    found=[]
+    for ident in request.evidence_job_ids:
+        job=store.get(ident) or {}
+        report=(job.get('result') or {}).get('report') or ''
+        found+=PATH_REF.findall(report)
+    return list(dict.fromkeys(found))

@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from .models import JobRequest, Review
 from .settings import initialize, STATE, PROJECT
 from .model_registry import model_name, allowed_names, models as registered_models, probe, OLLAMA
-from . import workspace
+from . import workspace, outcomes
 from .scoped import ScopeError
 from .store import Store
 from .runner import Runner, stop_process
@@ -28,6 +28,7 @@ from .profiles import show_profile, expand_profile
 
 class ApplyOptions(BaseModel):
     accept_removals: bool = False
+    accept_stale: bool = False
     revalidate: bool = False
     run_checks: bool = False
 
@@ -105,6 +106,7 @@ def create_app(store=None, start_workers=True):
         tasks=[]
         if start_workers:
             store.interrupt_running()
+            for job in workspace.recover():store.event(job,'workspace-apply-rolled-back',{'reason':'interrupted apply found at startup'})
             tasks=[asyncio.create_task(runner.scheduler()),asyncio.create_task(sample_hardware())]
         app.state.store=store;app.state.runner=runner
         yield
@@ -165,6 +167,10 @@ def create_app(store=None, start_workers=True):
     def submit(request:JobRequest):
         if request.in_place and request.caller=='mcp':
             raise HTTPException(403,'in_place is not available to MCP callers: Editor jobs run in a private workspace and change your tree only through apply_result. Humans can use local-worker --in-place.')
+        if request.board or request.board_mode:
+            raise HTTPException(410,'The multi-model Board was retired: it was 3-4x slower with no measured benefit (benchmarks/RESULTS.md). Use the default flow, or --verify for strict research.')
+        if request.agent_loop and request.role not in ('personal','researcher'):
+            raise HTTPException(409,'The older tool loop is only available for public web roles (--verify research); repository roles use the host pipelines, which measured better.')
         try:
             if request.source_job_id:raise ValueError('Use the saved-result analysis endpoint')
             for ident in request.evidence_job_ids:
@@ -254,14 +260,34 @@ def create_app(store=None, start_workers=True):
     @app.post('/api/jobs/{ident}/review',dependencies=[Depends(auth)])
     def review(ident:str,request:Review):
         job(ident)
-        try:return store.review(ident,request)
+        try:value=store.review(ident,request)
         except ValueError as e:raise HTTPException(409,str(e))
+        if request.decision!='accepted':
+            shipped=outcomes.final_diff(value)  # what the frontier finally left in the tree, for retrieval and router evaluation
+            store.event(ident,'final-frontier-diff',shipped)
+        return value
+
+    @app.post('/api/jobs/{ident}/outcome',dependencies=[Depends(auth)])
+    def outcome(ident:str):
+        """Capture the diff the frontier shipped after the worker's snapshot (call it once the frontier has finished its own edits)."""
+        value=outcomes.final_diff(job(ident));store.event(ident,'final-frontier-diff',value);return value
+
+    @app.post('/api/intel/{tool}',dependencies=[Depends(auth)])
+    def intel(tool:str,body:dict):
+        """Tier-0 code intelligence: deterministic, no model call, does not enter the job queue."""
+        from .intel import tools as intel_tools
+        try:return intel_tools.run(tool,str(body.get('repo') or ''),{k:v for k,v in body.items() if k!='repo'})
+        except (ValueError,OSError) as e:raise HTTPException(409,str(e))
+
+    @app.get('/api/outcomes',dependencies=[Depends(auth)])
+    def outcome_stats(include_eval:bool=False):
+        return {'by_kind':outcomes.stats(store.list(100000),include_eval)}
 
     @app.post('/api/jobs/{ident}/apply',dependencies=[Depends(auth)])
     def apply_result(ident:str,options:ApplyOptions|None=None):
         record=job(ident);options=options or ApplyOptions()
         if record['request']['role']!='editor' or record['state'] in ('queued','running'):raise HTTPException(409,'Apply needs a finished Editor job')
-        try:value=workspace.apply(ident,options.accept_removals,options.revalidate,options.run_checks)
+        try:value=workspace.apply(ident,options.accept_removals,options.revalidate,options.run_checks,options.accept_stale)
         except workspace.WorkspaceError as e:raise HTTPException(409,str(e))
         except ScopeError as e:raise HTTPException(403,str(e))
         store.event(ident,'workspace-'+value['state'],{k:value.get(k) for k in ('applied','conflicts')})

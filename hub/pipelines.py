@@ -8,7 +8,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 from .calls import Caller, load_profiles, write_session
 from .codeindex import CodeIndex, format_candidates, mentioned_text, select_ranges
-from . import contextpack, editgate, jsonedit, mappings
+from . import contextpack, editgate, execctx, jsonedit, mappings
 from .phases import resolve_phase
 from .localize import identifiers, read_ranges, repo_map, search_hits
 from .models import JobRequest
@@ -163,6 +163,17 @@ def read_references(files, request):
             out.append((relative, content, digest))
     return out
 
+def execution_focus(directory, files):
+    """Failure evidence and focus ranges from the baseline test run the runner saved for a fix_test job, or ('', {}) when there is none."""
+    path = directory / 'failure-evidence.json'
+    if not path.is_file():
+        return '', {}
+    try:
+        failures = json.loads(path.read_text()).get('failures', [])
+        return execctx.build(failures, CodeIndex.load(files))
+    except (OSError, ValueError, KeyError):
+        return '', {}
+
 def staged_diff(snapshots, contents):
     pieces = []
     for path, new in contents.items():
@@ -213,6 +224,9 @@ async def run_edit(directory, label, prompt, phase='work'):
             return
         # Thinking only on explicit request: with thinking the model spent the whole output budget reasoning and
         # wrote no edit blocks (role profiles default editor thinking to on for the older tool loop).
+        failure_text, focus = execution_focus(directory, files)
+        if failure_text:
+            prompt = prompt + '\n\n' + failure_text
         thinking = bool(request.model_thinking)
         name = phase if phase in ('edit',) else 'work'
         system = EDIT_BASE + (jsonedit.format_for(request.delete_paths) if request.edit_format == 'json' else textedit.format_for(request.delete_paths))
@@ -233,7 +247,7 @@ async def run_edit(directory, label, prompt, phase='work'):
             return
         spec, _ = resolve_phase(request, caller.profiles, name)
         references = read_references(files, request)
-        packed = contextpack.pack(snapshots, request.task, contextpack.budget_chars(spec.context, spec.output_limit, len(system) + len(prompt) + 400), references)
+        packed = contextpack.pack(snapshots, request.task, contextpack.budget_chars(spec.context, spec.output_limit, len(system) + len(prompt) + 400), references, focus)
         (directory / (label + '.context.json')).write_text(json.dumps(packed.report))
         (directory / (label + '.context.json')).chmod(0o600)
         pairs = mappings.extract(request.task)
@@ -263,7 +277,7 @@ async def run_edit(directory, label, prompt, phase='work'):
             return gen
         def pack_for(view, unit_task, header):
             budget = contextpack.budget_chars(spec.context, spec.output_limit, len(system) + len(header) + 400)
-            return contextpack.pack(view, unit_task, budget, references)
+            return contextpack.pack(view, unit_task, budget, references, focus)
 
         async def run_unit(unit_task, scope, unit_prompt, index):
             """One bounded task over `scope`: generate, continue after a cut-off reply, one corrective turn. Clean results are staged; returns errors."""

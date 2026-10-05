@@ -16,7 +16,8 @@ from pathlib import Path
 from .localize import CODE, identifiers
 from .settings import STATE
 
-VERSION = 2
+VERSION = 3
+MAX_CALLS = 3000
 MAX_FILE = 300_000
 JS = {'.js', '.jsx', '.mjs', '.cjs'}
 TS = {'.ts', '.tsx'}
@@ -71,12 +72,32 @@ def language(suffix):
 def node_text(node):
     return node.text.decode('utf-8', 'replace')
 
+def callee(node):
+    """The simple name a call expression invokes (`f` for f(), `g` for a.g()), or None for anything computed."""
+    if node.type in ('identifier', 'property_identifier', 'field_identifier', 'type_identifier'):
+        return node_text(node)
+    for field in ('property', 'field', 'name'):
+        if node.type in ('member_expression', 'selector_expression', 'field_expression', 'scoped_identifier') and (child := node.child_by_field_name(field)) is not None:
+            return node_text(child)
+    return None
+
 def python_facts(text):
-    defs, imports = [], []
+    defs, imports, calls, inherits = [], [], [], []
     try:
         tree = ast.parse(text)
     except SyntaxError:
-        return defs, imports
+        return defs, imports, calls, inherits
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and len(calls) < MAX_CALLS:
+            fn = node.func
+            name = fn.id if isinstance(fn, ast.Name) else fn.attr if isinstance(fn, ast.Attribute) else None
+            if name:
+                calls.append([name, node.lineno])
+        elif isinstance(node, ast.ClassDef):
+            for base in node.bases:
+                name = base.id if isinstance(base, ast.Name) else base.attr if isinstance(base, ast.Attribute) else None
+                if name:
+                    inherits.append([node.name, name, node.lineno])
     def visit(body, owner=''):
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -92,15 +113,15 @@ def python_facts(text):
             elif isinstance(node, ast.ImportFrom):
                 imports.append(['.' * node.level + (node.module or ''), node.lineno])
     visit(tree.body)
-    return defs, imports
+    return defs, imports, calls, inherits
 
 def ts_facts(suffix, source):
     lang = language(suffix)
     if lang is None:
-        return [], []
+        return [], [], [], []
     from tree_sitter import Language, Parser
     root = Parser(Language(lang)).parse(source.encode('utf-8', 'replace')).root_node
-    defs, imports = [], []
+    defs, imports, calls, inherits = [], [], [], []
     named = {'function_declaration': 'function', 'generator_function_declaration': 'function', 'class_declaration': 'class',
              'abstract_class_declaration': 'class', 'method_definition': 'method', 'interface_declaration': 'interface',
              'type_alias_declaration': 'type', 'enum_declaration': 'enum', 'method_declaration': 'method', 'type_spec': 'type',
@@ -111,6 +132,15 @@ def ts_facts(suffix, source):
         node, depth = stack.pop()
         kind = node.type
         line, end = node.start_point[0] + 1, node.end_point[0] + 1
+        if kind in ('class_declaration', 'abstract_class_declaration') and (cname := node.child_by_field_name('name')) is not None:
+            for child in node.children:
+                if child.type == 'class_heritage':
+                    inner = [child]
+                    while inner:
+                        part = inner.pop()
+                        if part.type in ('identifier', 'type_identifier'):
+                            inherits.append([node_text(cname), node_text(part), line])
+                        inner.extend(part.children)
         if kind in named and (name := node.child_by_field_name('name')) is not None:
             defs.append([node_text(name), named[kind], line, end])
         elif kind == 'variable_declarator' and (name := node.child_by_field_name('name')) is not None and name.type == 'identifier':
@@ -129,14 +159,18 @@ def ts_facts(suffix, source):
                 imports.append([node_text(src).strip('\'"`'), line])
         elif kind == 'call_expression':
             fn, args = node.child_by_field_name('function'), node.child_by_field_name('arguments')
+            if fn is not None and len(calls) < MAX_CALLS and (called := callee(fn)):
+                calls.append([called, line])
             if fn is not None and node_text(fn) == 'require' and args is not None and args.named_child_count and args.named_children[0].type == 'string':
                 imports.append([node_text(args.named_children[0]).strip('\'"`'), line])
+        elif kind == 'impl_item' and (target := node.child_by_field_name('type')) is not None and (trait := node.child_by_field_name('trait')) is not None:
+            inherits.append([node_text(target), node_text(trait).split('::')[-1].split('<')[0], line])
         elif kind == 'import_spec' and (path := node.child_by_field_name('path')) is not None:
             imports.append([node_text(path).strip('"'), line])
         elif kind == 'use_declaration':
             imports.append([node_text(node).removeprefix('use ').rstrip(';'), line])
         stack.extend((child, depth + 1) for child in reversed(node.children))
-    return defs, imports
+    return defs, imports, calls, inherits
 
 def word_table(text):
     table = defaultdict(list)
@@ -151,12 +185,12 @@ def word_table(text):
 def analyze(path, text):
     suffix = Path(path).suffix
     if suffix == '.py':
-        defs, imports = python_facts(text)
+        defs, imports, calls, inherits = python_facts(text)
     elif suffix in JS | TS | {'.go', '.rs'}:
-        defs, imports = ts_facts(suffix, text)
+        defs, imports, calls, inherits = ts_facts(suffix, text)
     else:
-        defs, imports = [], []
-    return {'defs': defs, 'imports': imports, 'words': word_table(text)}
+        defs, imports, calls, inherits = [], [], [], []
+    return {'defs': defs, 'imports': imports, 'calls': calls, 'inherits': inherits, 'words': word_table(text)}
 
 class CodeIndex:
     def __init__(self, files):
@@ -251,6 +285,34 @@ class CodeIndex:
 
     def importers(self, path):
         return [(other, line) for other, info in self.data.items() for raw, line in info['imports'] if self.resolve(raw, other) == path]
+
+    def enclosing_def(self, path, line):
+        """The smallest definition containing the line, as (name, kind, start, end), or None at module level."""
+        spans = [(e - s, k in ('class', 'interface', 'struct', 'trait', 'enum', 'type', 'module'), n, k, s, e) for n, k, s, e in self.data.get(path, {}).get('defs', [])
+                 if s <= line <= e and k not in ('variable', 'property', 'const')]  # on a tie a function or method beats the type that contains it
+        return min(spans)[2:] if spans else None
+
+    def callers_of(self, name, limit=40):
+        """Call sites of a name with the definition each sits in. Name-based: two functions with the same name are not told apart."""
+        found = []
+        for path, info in sorted(self.data.items()):
+            for called, line in info.get('calls', []):
+                if called == name:
+                    inside = self.enclosing_def(path, line)
+                    found.append({'path': path, 'line': line, 'in': inside[0] if inside else None, 'kind': inside[1] if inside else 'module'})
+        return found[:limit]
+
+    def callees_of(self, path, start, end):
+        """Names called inside a line range, with the definitions they resolve to by name (empty list for library or unresolved calls)."""
+        names = {}
+        for called, line in self.data.get(path, {}).get('calls', []):
+            if start <= line <= end:
+                names.setdefault(called, []).append(line)
+        return [{'name': n, 'lines': lines[:5], 'definitions': self.definitions(n)[:3]} for n, lines in sorted(names.items())]
+
+    def subclasses(self, name):
+        """Types that extend or implement `name` (Python bases, TS extends/implements, Rust `impl Trait for Type`); Go interfaces are structural and not found."""
+        return [{'path': path, 'name': child, 'line': line} for path, info in sorted(self.data.items()) for child, base, line in info.get('inherits', []) if base == name]
 
     def enclosing(self, path, line):
         """Smallest definition span containing the line, so a reference is read together with its function."""

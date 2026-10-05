@@ -28,7 +28,7 @@ def test_the_wrappers_exist_and_none_of_the_surface_offers_unsafe_options():
     for name in ('investigate_code', 'implement_change', 'fix_failing_test', 'add_regression_test', 'run_checks'):
         assert not {'in_place', 'agent_loop', 'board', 'skip_gate'} & set(tools[name].inputSchema['properties'])
     assert 'in_place' not in tools['submit_job'].inputSchema['properties'] and 'skip_gate' not in tools['submit_job'].inputSchema['properties']
-    assert {'accept_removals', 'revalidate', 'run_checks'} <= set(tools['apply_result'].inputSchema['properties'])
+    assert {'accept_removals', 'revalidate', 'run_checks', 'accept_stale'} <= set(tools['apply_result'].inputSchema['properties'])
 
 def test_investigate_code_is_a_read_only_kinded_job(submitted, repo):
     result = invoke('investigate_code', {'repo': str(repo), 'question': 'Where is answer used?', 'kind': 'config_use', 'read_paths': ['app.ts']})
@@ -68,3 +68,9 @@ def test_run_checks_is_a_zero_token_validator_job(submitted, repo):
     invoke('run_checks', {'repo': str(repo), 'checks': [{'name': 'tests', 'argv': ['pytest', '-q']}]})
     request = body(submitted)
     assert request['role'] == 'validator' and request['kind'] == 'run_tests' and request['summary_mode'] == 'none' and request['checks'][0]['argv'] == ['pytest', '-q']
+
+def test_tier0_tools_and_record_outcome_are_registered_read_only_where_they_should_be():
+    tools = {t.name: t for t in asyncio.run(create_server().list_tools())}
+    for name in ('find_symbol', 'find_references', 'find_implementations', 'callers', 'callees', 'diagnostics', 'symbol_context', 'outline'):
+        assert tools[name].annotations.readOnlyHint is True and 'repo' in tools[name].inputSchema['properties']
+    assert 'record_outcome' in tools and 'board' not in tools['submit_job'].inputSchema['properties']

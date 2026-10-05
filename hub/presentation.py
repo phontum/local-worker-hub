@@ -81,6 +81,7 @@ def result_summary(job):
                  answer_review=r.get('answer_review'), board=r.get('board'), ask=r.get('ask'), artifacts=refs, full_result=f"/api/jobs/{job['id']}/result?view=full")
     if r.get('workspace'):value.update(workspace=live_workspace(job),acceptance=r.get('acceptance'));value['artifacts']=[*refs,'patch.diff']
     elif r.get('acceptance'):value['acceptance']=r['acceptance']
+    if r.get('spec_verification'):value['spec_verification']={k:v for k,v in r['spec_verification'].items() if k!='results'}|{'results':r['spec_verification']['results'][:20]}
     if r.get('proposed_split'):value['proposed_split']=r['proposed_split'];value['gate']=r.get('gate')
     parsed=parse_report(r.get('report') or '')
     if parsed:value['answer']=parsed['findings'][:3000]

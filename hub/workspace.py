@@ -43,12 +43,30 @@ def listing(origin):
         names += [str((Path(base) / f).relative_to(origin)) for f in files]
     return sorted(names)
 
-def create(origin, ident, allowed_paths, dependencies=(), delete_paths=(), checks=()):
-    """Copy the tree, commit a baseline and record the hash of each authorized file; returns the workspace record."""
-    origin = Path(origin).resolve()
-    work = ROOT / ident / 'tree'
-    work.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(work.parent, 0o700)
+MAX_DEPENDENCIES = 300
+
+def expand_dependencies(origin, names):
+    """Files behind read_paths: a directory root contributes its files (guarded, bounded), a missing name nothing."""
+    origin, found = Path(origin), []
+    for name in names:
+        target = origin / name
+        if '..' in Path(name).parts or Path(name).is_absolute() or sensitive(name):
+            continue
+        if target.is_file() and not target.is_symlink():
+            found.append(name)
+        elif target.is_dir() and not target.is_symlink():
+            for base, dirs, files in os.walk(target, followlinks=False):
+                dirs[:] = sorted(d for d in dirs if d not in EXCLUDED and not (Path(base) / d).is_symlink())
+                for f in sorted(files):
+                    relative = str((Path(base) / f).relative_to(origin))
+                    if not sensitive(relative) and not (Path(base) / f).is_symlink():
+                        found.append(relative)
+                if len(found) >= MAX_DEPENDENCIES:
+                    break
+    return list(dict.fromkeys(found))[:MAX_DEPENDENCIES]
+
+def _copy_tree(origin, work):
+    """Copy the files `listing` names, skipping secrets, symlinks and oversized files; the fallback for non-git trees."""
     total, copied = 0, 0
     for name in listing(origin):
         source = origin / name
@@ -60,11 +78,72 @@ def create(origin, ident, allowed_paths, dependencies=(), delete_paths=(), check
         total += size
         if total > MAX_TOTAL:
             shutil.rmtree(work.parent, ignore_errors=True)
-            raise WorkspaceError(f'Repository is larger than {MAX_TOTAL // 1_000_000} MB; use in_place or narrow the repository')
+            raise WorkspaceError(f'Repository is larger than {MAX_TOTAL // 1_000_000} MB; name a narrower repository (a git work tree has no such limit)')
         target = work / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
         copied += 1
+    return copied
+
+def _is_git_root(origin):
+    probe = subprocess.run(['git', '-C', str(origin), 'rev-parse', '--show-toplevel'], capture_output=True, text=True)
+    return probe.returncode == 0 and Path(probe.stdout.strip()).resolve() == origin
+
+def _clone_tree(origin, work):
+    """Fast snapshot of a git work tree: a shared clone of HEAD (objects are borrowed, nothing is written to the user's .git), then the
+    uncommitted state laid over it: modified, staged and untracked files are copied, files deleted in the user's tree are removed.
+    Secrets, symlinks and oversized files are dropped like in the copy path. Returns the file count, or None to fall back to copying."""
+    if not _is_git_root(origin) or subprocess.run(['git', '-C', str(origin), 'rev-parse', '--verify', '-q', 'HEAD'], capture_output=True).returncode:
+        return None
+    shutil.rmtree(work, ignore_errors=True)
+    done = subprocess.run(['git', 'clone', '-q', '--shared', '--no-checkout', '--no-hardlinks', str(origin), str(work)], capture_output=True, text=True)
+    if done.returncode:
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return None
+    # The clone keeps an `origin` remote and branch refs; the workspace needs a private history only.
+    for step in (['remote', 'remove', 'origin'], ['checkout', '-q', '--detach', 'HEAD']):
+        if subprocess.run(GIT + ['-C', str(work)] + step, capture_output=True, text=True).returncode:
+            shutil.rmtree(work, ignore_errors=True)
+            work.mkdir(parents=True, exist_ok=True, mode=0o700)
+            return None
+    changed = subprocess.run(['git', '-C', str(origin), 'diff', '--name-only', '-z', 'HEAD'], capture_output=True, text=True).stdout.split('\0')
+    untracked = subprocess.run(['git', '-C', str(origin), 'ls-files', '-z', '--others', '--exclude-standard'], capture_output=True, text=True).stdout.split('\0')
+    for name in dict.fromkeys(n for n in changed + untracked if n):
+        source, target = origin / name, work / name
+        if source.is_file() and not source.is_symlink():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.is_symlink() or target.is_dir():
+                target.unlink() if target.is_symlink() else shutil.rmtree(target)
+            shutil.copy2(source, target)
+        elif target.is_file() or target.is_symlink():
+            target.unlink()
+    copied = 0
+    for name in subprocess.run(['git', '-C', str(work), 'ls-files', '-z'], capture_output=True, text=True).stdout.split('\0'):
+        if not name:
+            continue
+        target = work / name
+        if (sensitive(name) or target.is_symlink() or not target.is_file() or target.stat().st_size > MAX_FILE) and (target.is_symlink() or target.exists()):
+            target.unlink()
+        elif target.is_file():
+            copied += 1
+    for name in subprocess.run(['git', '-C', str(work), 'ls-files', '-z', '--others', '--exclude-standard'], capture_output=True, text=True).stdout.split('\0'):
+        if name and (sensitive(name) or (work / name).is_symlink() or (work / name).stat().st_size > MAX_FILE):
+            (work / name).unlink()
+        elif name:
+            copied += 1
+    shutil.rmtree(work / '.git' / 'refs' / 'remotes', ignore_errors=True)
+    return copied
+
+def create(origin, ident, allowed_paths, dependencies=(), delete_paths=(), checks=()):
+    """Copy the tree, commit a baseline and record the hash of each authorized file; returns the workspace record."""
+    origin = Path(origin).resolve()
+    work = ROOT / ident / 'tree'
+    work.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(work.parent, 0o700)
+    copied = _clone_tree(origin, work)
+    if copied is None:
+        copied = _copy_tree(origin, work)
     for name in LINK_DIRS:
         if (origin / name).is_dir() and not (origin / name).is_symlink() and not (work / name).exists():
             (work / name).symlink_to(origin / name, target_is_directory=True)
@@ -85,7 +164,7 @@ def create(origin, ident, allowed_paths, dependencies=(), delete_paths=(), check
             shutil.copy2(origin / p, base_dir / p)
     record = {'origin': str(origin), 'path': str(work), 'created': time.time(), 'state': 'ready', 'files': copied,
               'allowed': sorted(allowed_paths), 'base': {p: sha(origin / p) for p in allowed_paths}, 'delete': sorted(delete_paths),
-              'dependencies': {p: sha(origin / p) for p in dependencies if p not in allowed_paths and (origin / p).is_file()}, 'checks': list(checks),
+              'dependencies': {p: sha(origin / p) for p in expand_dependencies(origin, dependencies) if p not in allowed_paths}, 'checks': list(checks),
               'chain': [ident], 'root_commit': root_commit, 'baseline_commit': root_commit, 'job_allowed': sorted(allowed_paths)}
     write_record(ident, record)
     return record
@@ -151,7 +230,7 @@ def chain(origin, ident, parent, allowed_paths, dependencies=(), delete_paths=()
                 shutil.copy2(work / p, ROOT / ident / 'base' / p)
     deps = dict(previous.get('dependencies', {}))
     origin_path = Path(previous['origin'])
-    deps.update({p: sha(origin_path / p) for p in dependencies if p not in base and (origin_path / p).is_file()})
+    deps.update({p: sha(origin_path / p) for p in expand_dependencies(origin_path, dependencies) if p not in base})
     merged_checks = list(previous.get('checks', []))
     merged_checks += [c for c in checks if c not in merged_checks]
     record = {**previous, 'created': time.time(), 'state': 'ready', 'chain': previous.get('chain', [parent]) + [ident], 'parent': parent, 'baseline_commit': baseline,
@@ -202,11 +281,114 @@ def revalidate(record, ident):
 def compact(results):
     return [{k: r.get(k) for k in ('name', 'status', 'exit_code', 'reason', 'counts')} | {'failures': [f"{f['test_id']} ({f.get('file')}:{f.get('line')})" for f in r.get('failures', [])[:5]]} for r in results]
 
-def apply(ident, accept_removals=False, revalidate_first=False, run_checks=False):
+def _guard_target(origin, name):
+    target = origin / name
+    for part in [target, *target.parents]:
+        if part == origin:
+            break
+        if part.is_symlink():
+            raise ScopeError('Refusing to write through a symlink: ' + name)
+    if sensitive(name) or '..' in Path(name).parts or Path(name).is_absolute():
+        raise ScopeError('Refusing to write outside the authorized scope: ' + name)
+    return target
+
+def journal_path(ident):
+    return ROOT / ident / 'apply.journal'
+
+def _restore(origin, journal, ident):
+    """Put every file named in the journal back to its backed-up pre-image (or remove a file that did not exist)."""
+    backup = ROOT / ident / 'apply-backup'
+    for entry in journal['files']:
+        target = origin / entry['name']
+        saved = backup / entry['name']
+        if entry['existed']:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(target.name + '.lw-restore')
+            shutil.copy2(saved, temporary)
+            os.replace(temporary, target)
+        else:
+            target.unlink(missing_ok=True)
+
+def _commit(origin, ident, writes, removals):
+    """All-or-nothing write into the user's tree.
+
+    `writes` maps a relative name to the source file holding the new bytes; `removals` lists names to delete. Every target is validated before
+    anything is written, new bytes are staged next to their targets, the current bytes are backed up and a journal is fsynced, then the files are
+    replaced one by one. Any failure (including a file that changed since it was backed up) restores every file already replaced and re-raises,
+    so the tree is either fully before or fully after. A journal that survives a crash is rolled back by `recover`."""
+    names = list(writes) + list(removals)
+    targets = {name: _guard_target(origin, name) for name in names}
+    backup = ROOT / ident / 'apply-backup'
+    shutil.rmtree(backup, ignore_errors=True)
+    staged, journal = [], {'time': time.time(), 'origin': str(origin), 'files': []}
+    try:
+        for name in names:
+            target = targets[name]
+            existed = target.is_file()
+            digest = sha(target)
+            if existed:
+                (backup / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, backup / name)
+            journal['files'].append({'name': name, 'existed': existed, 'pre': digest, 'post': sha(writes[name]) if name in writes else None})
+        for name in writes:
+            target = targets[name]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(target.name + '.lw-apply')
+            staged.append(temporary)
+            shutil.copy2(writes[name], temporary)
+        journal_file = journal_path(ident)
+        journal_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(journal_file, 'w') as handle:
+            json.dump(journal, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        replaced = []
+        try:
+            for entry in journal['files']:
+                name, target = entry['name'], targets[entry['name']]
+                if sha(target) != entry['pre']:
+                    raise WorkspaceError('File changed while applying: ' + name)
+                replaced.append(entry)
+                if name in writes:
+                    os.replace(target.with_name(target.name + '.lw-apply'), target)
+                else:
+                    target.unlink(missing_ok=True)
+        except BaseException:
+            _restore(origin, {'files': replaced}, ident)
+            raise
+    except BaseException:
+        for temporary in staged:
+            temporary.unlink(missing_ok=True)
+        journal_path(ident).unlink(missing_ok=True)
+        raise
+    journal_path(ident).unlink(missing_ok=True)
+    shutil.rmtree(backup, ignore_errors=True)
+    return [entry['name'] for entry in journal['files']]
+
+def recover(ident=None):
+    """Roll back any apply interrupted by a crash (a journal left behind); returns the job ids that were rolled back."""
+    rolled = []
+    for journal_file in ([journal_path(ident)] if ident else ROOT.glob('*/apply.journal') if ROOT.is_dir() else []):
+        if not journal_file.is_file():
+            continue
+        job = journal_file.parent.name
+        try:
+            journal = json.loads(journal_file.read_text())
+            _restore(Path(journal['origin']), journal, job)
+        except (OSError, ValueError, KeyError):
+            continue
+        journal_file.unlink(missing_ok=True)
+        shutil.rmtree(ROOT / job / 'apply-backup', ignore_errors=True)
+        rolled.append(job)
+    return rolled
+
+def apply(ident, accept_removals=False, revalidate_first=False, run_checks=False, accept_stale=False):
     """Write the changed authorized files into the user's tree, but only if none of them changed there since the snapshot.
 
     Removals (a file missing from the workspace) are applied only when the job declared them in delete_paths and `accept_removals` is set.
     `revalidate_first` re-runs the job's approved checks on your tree as it is now plus the job's changes before writing anything;
+    Files the job only read (read_paths, evidence) that changed since the snapshot make the patch unverified against current code: apply refuses unless
+    `revalidate_first` passes or `accept_stale` is set.
     `run_checks` runs them in your tree after the write (no automatic revert; use `revert`)."""
     record = read_record(ident)
     if record['state'] == 'chained':
@@ -226,6 +408,9 @@ def apply(ident, accept_removals=False, revalidate_first=False, run_checks=False
     undeclared = [p for p in removed if p not in record.get('delete', [])]
     if removed and (undeclared or not accept_removals):
         return {'applied': [], 'conflicts': [], 'pending_removals': removed, 'undeclared_removals': undeclared, 'stale_dependencies': stale, 'state': 'ready'}
+    if stale and not accept_stale and not revalidate_first:
+        return {'applied': [], 'conflicts': [], 'stale_dependencies': stale, 'refused': 'stale_dependencies', 'state': 'ready',
+                'hint': 'Files the job read changed since its snapshot. Re-run with revalidate (approved checks must pass) or accept_stale after reviewing them.'}
     drift = [p for p in record['changed'] if sha(work / p) != record['result'][p]]
     if drift:
         raise WorkspaceError('Workspace files changed after the patch was recorded: ' + ', '.join(drift))
@@ -233,24 +418,14 @@ def apply(ident, accept_removals=False, revalidate_first=False, run_checks=False
         results = revalidate(record, ident)
         if not results or any(r['status'] != 'passed' for r in results):
             return {'applied': [], 'conflicts': [], 'stale_dependencies': stale, 'revalidation': compact(results), 'state': 'ready'}
-    applied = []
-    for name in record['changed'] + removed:
-        target = origin / name
-        for part in [target, *target.parents]:
-            if part == origin:
-                break
-            if part.is_symlink():
-                raise ScopeError('Refusing to write through a symlink: ' + name)
-        if sensitive(name) or '..' in Path(name).parts:
-            raise ScopeError('Refusing to write outside the authorized scope: ' + name)
-        if name in removed:
-            target.unlink(missing_ok=True)
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_name(target.name + '.lw-apply')
-            shutil.copy2(work / name, temporary)
-            os.replace(temporary, target)
-        applied.append(name)
+    try:
+        applied = _commit(origin, ident, {name: work / name for name in record['changed']}, removed)
+    except ScopeError:
+        raise
+    except (OSError, WorkspaceError) as error:
+        record['apply_error'] = str(error)[:300]
+        write_record(ident, record)
+        raise WorkspaceError('Apply failed and was rolled back; your tree is unchanged: ' + str(error)[:200]) from error
     record['state'] = 'applied'
     record['applied'] = time.time()
     record['applied_sha'] = {name: sha(origin / name) for name in applied}
@@ -283,16 +458,19 @@ def revert(ident):
     conflicts = [p for p, digest in record.get('applied_sha', {}).items() if sha(origin / p) != digest]
     if conflicts:
         return {'reverted': [], 'conflicts': conflicts, 'state': 'applied'}
-    restored = []
+    writes, deletes = {}, []
     for name in record.get('applied_sha', {}):
-        target = origin / name
         saved = next((b / name for b in bases if (b / name).is_file()), None)
         if saved is not None:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(saved, target)
+            writes[name] = saved
         else:
-            target.unlink(missing_ok=True)
-        restored.append(name)
+            deletes.append(name)
+    try:
+        restored = _commit(origin, ident, writes, deletes)
+    except ScopeError:
+        raise
+    except (OSError, WorkspaceError) as error:
+        raise WorkspaceError('Revert failed and was rolled back; your tree is unchanged: ' + str(error)[:200]) from error
     record['state'] = 'reverted'
     record['reverted'] = time.time()
     write_record(ident, record)

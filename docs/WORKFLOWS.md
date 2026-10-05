@@ -558,6 +558,31 @@ the bug and pass with a reference fix). The model is chosen per request and veri
 ten-change task and the same work split per file) and reports false-COMPLETE, destructive-edit escapes, partial applications, silent truncations, seconds, tokens and review effort.
 Deterministic replays of each documented failure live in `tests/test_edit_incidents.py`.
 
+## Tier-0 tools, delegation specs, outcomes and safer apply
+
+- **Tier 0 (no model call).** `find_symbol`, `find_references`, `find_implementations`, `callers`, `callees`, `diagnostics`, `symbol_context` and `outline` are MCP tools
+  (and `local-worker intel TOOL NAME`) answered synchronously by the service from the CodeIndex (`hub/intel/`). Every answer says `provider` and `precision`:
+  `syntactic` is a parsed exact-name match, `lexical` a name-contains fallback. They are name-based (same-named symbols are not told apart, at most 8 reference lines per
+  file per word, Go interfaces are not found as implementations) and `diagnostics` reports syntax errors and unresolved relative imports only, not types. The interface
+  (`hub/intel/provider.py`) is what an LSP or SCIP provider would implement; none exists yet, and nothing has been benchmarked against a language server.
+- **DelegationSpec** (`hub/spec.py`): goal, kind, targets, changes (with typed `old -> new` mappings), invariants and acceptance criteria, evidence, scope, checks.
+  MCP `delegate(repo, spec)` or `local-worker spec check|submit FILE` compile it into the same JobRequest as before; `local-worker spec draft "task"` shows what the host
+  understands of a natural-language task without a model. Mechanical criteria (`file_unchanged`, `symbol_exists`, `symbol_absent`, `no_new_files`, `check_passes`) are verified
+  after the edit and appear as `spec_verification`; an unmet one turns COMPLETE into PARTIAL, `text` criteria are left to the frontier. Natural-language tasks are unchanged.
+- **Execution-guided `fix_test`.** The failing test is run once before the edit; its parsed stack frames (`hub/testparse.py`) are resolved to the enclosing functions
+  (`hub/execctx.py`) and those ranges are shown to the editor ahead of everything else, with a short failure-evidence block. No frames, no change.
+- **Outcomes.** `record_review` now needs a reason code on a rejection or takeover (`wrong_localization` and `context_missing` were added). `record_outcome JOB` (or `local-worker outcome JOB`;
+  it also runs automatically on a rejection or takeover) stores `final-frontier.diff`: the authorized files as the worker's snapshot saw them against your tree now.
+  `local-worker stats` prints acceptance by role and kind; benchmark (`eval`, `benchmark`) jobs are excluded by their `caller`. `hub/outcomes.py:row` derives a feature row per job; nothing is duplicated.
+- **Apply is transactional.** Targets are validated first, the current bytes are backed up and journalled, files are replaced one by one and any failure restores them
+  (`apply.journal`; a journal left by a crash is rolled back when the service starts). `apply_result` refuses while a file the job only read changed (`read_paths` directories and
+  files cited as `path:line` by attached evidence jobs are tracked) unless `revalidate` passes or `accept_stale` is set. For a git work tree the private workspace is a shared clone
+  of HEAD plus your uncommitted files, so there is no size cap; a plain directory is still copied with the 300 MB cap.
+- **Replay fixtures.** `local-worker incident JOB --fixture DIR` writes the task, the pre-edit files and the raw replies of an Editor job (PRIVATE source: review before committing);
+  fixtures placed in `tests/data/incidents/` are replayed by `tests/test_incident_fixtures.py` through the real edit pipeline.
+- **Retired.** The Board is refused (`--board`, the dashboard option and the MCP parameter are gone; old board jobs stay viewable); `--agent-loop` is refused for repository roles.
+  `auto_split`, `edit_format=json` and `match_mode=word` are still in the code and are scheduled for removal once `eval_junior` and the incident benchmark can be re-run against the live model.
+
 ## Hardware and runtime notes
 
 - **Memory:** On this class of machine (12 GB VRAM, 16 GB RAM, WSL with about 8 GB), 9-12B dense models are the

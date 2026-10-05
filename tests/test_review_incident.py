@@ -25,8 +25,9 @@ def test_rejection_and_takeover_need_notes_but_acceptance_does_not():
 
 
 def test_summary_counts_rejections_and_takeovers_by_kind_and_reason(store, repo):
+    # A review stored before reasons were required has none; summaries must still count it (model_construct skips today's validator).
     for key, kind, review in (('r1', 'mechanical', Review(decision='rejected', notes='Output was cut off', reason='truncated')),
-                              ('r2', 'mechanical', Review(decision='takeover', notes='Gave up on the large file')),
+                              ('r2', 'mechanical', Review.model_construct(decision='takeover', reason=None, baseline_frontier_tokens=None, delegated_frontier_tokens=None, baseline_frontier_cost=None, delegated_frontier_cost=None, measurement_source='measured', task_outcome=None, review_effort_seconds=None, notes='Gave up on the large file')),
                               ('r3', 'fix_test', Review(decision='accepted'))):
         job = store.submit(JobRequest(role='editor', task='x', repo=str(repo), allowed_paths=['app.ts'], idempotency_key=key, kind=kind))
         store.next()

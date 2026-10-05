@@ -99,7 +99,7 @@ def ranges_of(keep):
         out.append([start + 1, previous + 1])
     return out
 
-def pack_files(snapshots, task, budget, targets):
+def pack_files(snapshots, task, budget, targets, focus=None):
     texts, shown, rows_by_path = {}, {}, {}
     full = {p: render_whole(p, s[1]) for p, s in snapshots.items()}
     if sum(len(v) for v in full.values()) <= budget:
@@ -116,6 +116,7 @@ def pack_files(snapshots, task, budget, targets):
         rows, found = regions(p, content, task, targets)
         rows_by_path[p] = rows
         keep[p] = set()
+        found += [(-1, max(0, a - 1 - 5), min(len(rows), b + 5)) for a, b in (focus or {}).get(p, [])]  # where the failing test ran: shown before even the head
         if len(rows) <= SMALL_FILE:
             found = [(0, 0, len(rows))]
         candidates += [(prio, index, p, s, e) for prio, s, e in found]
@@ -125,7 +126,7 @@ def pack_files(snapshots, task, budget, targets):
         rows = rows_by_path[p]
         fresh = [i for i in range(s, e) if i not in keep[p]]
         cost = sum(len(rows[i]) + 1 for i in fresh)
-        if used + cost <= budget or (prio == 0 and not keep[p]):
+        if used + cost <= budget or (prio <= 0 and not keep[p]):
             keep[p].update(fresh)
             used += cost
     for _ in range(12):  # spend what is left on neighbouring lines of what is already shown
@@ -189,15 +190,15 @@ def coverage(snapshots, targets, texts):
             hidden.append(text)
     return {'named': len(targets), 'found': len(found_any), 'missing_mappings': missing, 'hidden': hidden}
 
-def pack(snapshots, task, budget, references=None):
+def pack(snapshots, task, budget, references=None, focus=None):
     """The authorized files plus read-only references as prompt text, and a report of what was shown."""
     targets = named_targets(task)
     ref_estimate = min(sum(min(len(t), MAX_REFERENCE) for _, t, _ in references or []), int(budget * 0.25))
-    texts, shown = pack_files(snapshots, task, budget - ref_estimate, targets)
+    texts, shown = pack_files(snapshots, task, budget - ref_estimate, targets, focus)
     used = sum(len(v) for v in texts.values())
     blocks, ref_report = pack_references(references, max(0, budget - used))
     text = '\n\n'.join(list(texts.values()) + blocks)
-    report = {'budget_chars': budget, 'used_chars': len(text), 'files': shown, 'references': ref_report, 'coverage': coverage(snapshots, targets, texts)}
+    report = {'budget_chars': budget, 'used_chars': len(text), 'files': shown, 'references': ref_report, 'coverage': coverage(snapshots, targets, texts), 'focus': {p: [list(r) for r in rs] for p, rs in (focus or {}).items() if p in snapshots}}
     return Packed(text, report)
 
 def digest_of(text):

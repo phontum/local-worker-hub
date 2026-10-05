@@ -115,13 +115,38 @@ def test_an_undeclared_removal_is_never_applied_even_when_accepted(origin):
     result = workspace.apply('rm2', accept_removals=True)
     assert result['undeclared_removals'] == ['src/old.py'] and result['applied'] == [] and (origin / 'src' / 'old.py').exists()
 
-def test_stale_dependencies_are_reported_at_apply_and_do_not_block(origin):
+def test_stale_dependencies_refuse_apply_until_revalidated_or_accepted(origin):
     workspace.create(origin, 'dep1', ['src/a.py'], dependencies=['theme.py', 'src/a.py', 'missing.py'])
     assert list(workspace.read_record('dep1')['dependencies']) == ['theme.py'] and workspace.stale_dependencies('dep1') == []
     (work_of('dep1') / 'src' / 'a.py').write_text('x = 2\n')
     (origin / 'theme.py').write_text('BLUE = 2\n')
-    result = workspace.apply('dep1')
+    refused = workspace.apply('dep1')
+    assert refused['refused'] == 'stale_dependencies' and refused['stale_dependencies'] == ['theme.py'] and refused['applied'] == []
+    assert (origin / 'src' / 'a.py').read_text() == 'x = 1\n'
+    result = workspace.apply('dep1', accept_stale=True)
     assert result['stale_dependencies'] == ['theme.py'] and result['applied'] == ['src/a.py']
+
+def test_revalidation_with_passing_checks_allows_a_stale_apply(origin):
+    workspace.create(origin, 'dep2', ['src/a.py'], dependencies=['theme.py'], checks=[pass_check()])
+    (work_of('dep2') / 'src' / 'a.py').write_text('x = 2\n')
+    (origin / 'theme.py').write_text('BLUE = 2\n')
+    assert workspace.apply('dep2', revalidate_first=True)['applied'] == ['src/a.py']
+
+def test_a_directory_read_root_tracks_its_files_and_skips_secrets(origin):
+    (origin / 'conf').mkdir()
+    (origin / 'conf' / 'a.cfg').write_text('1\n')
+    (origin / 'conf' / '.env').write_text('SECRET=1\n')
+    workspace.create(origin, 'dep3', ['src/a.py'], dependencies=['conf'])
+    assert list(workspace.read_record('dep3')['dependencies']) == ['conf/a.cfg']
+    (origin / 'conf' / 'a.cfg').write_text('2\n')
+    assert workspace.stale_dependencies('dep3') == ['conf/a.cfg']
+
+def test_files_cited_by_evidence_reports_are_extracted():
+    from hub.evidence import evidence_paths
+    class S:
+        def get(self, i): return {'result': {'report': 'timeout at src/a.py:12 and hub/x.py:3, see http://h.com/a.py:80'}}
+    class R: evidence_job_ids = ['e1']
+    assert evidence_paths(S(), R()) == ['src/a.py', 'hub/x.py']
 
 def test_revalidation_runs_the_checks_on_the_current_tree_plus_the_patch_and_blocks_a_failure(origin):
     # The job's change is fine in isolation, but the user's tree now has a second file the check inspects.
@@ -211,3 +236,155 @@ async def test_the_packet_flags_undeclared_removals_and_the_result_shows_stale_d
     (origin / 'theme.py').write_text('BLUE = 5\n')
     live = result_summary(final)['workspace']
     assert live['stale_dependencies'] == ['theme.py'] and live['removed'] == ['src/old.py']
+
+# Transactional apply and revert -----------------------------------------------------------------------------------------
+
+def three_file_job(origin, ident):
+    workspace.create(origin, ident, ['src/a.py', 'src/old.py', 'theme.py'])
+    for name, text in (('src/a.py', 'x = 2\n'), ('src/old.py', 'legacy = False\n'), ('theme.py', 'BLUE = 2\n')):
+        (work_of(ident) / name).write_text(text)
+    workspace.patch(ident)
+
+def tree_state(origin):
+    return {n: (origin / n).read_text() for n in ('src/a.py', 'src/old.py', 'theme.py')}
+
+@pytest.mark.parametrize('fail_on', [1, 2, 3])
+def test_a_failed_write_midway_leaves_the_tree_exactly_as_it_was(origin, monkeypatch, fail_on):
+    three_file_job(origin, 'tx1')
+    before = tree_state(origin)
+    real, calls_seen = workspace.os.replace, {'n': 0}
+    def flaky(src, dst):
+        if str(src).endswith('.lw-apply'):
+            calls_seen['n'] += 1
+            if calls_seen['n'] == fail_on:
+                raise OSError('disk full')
+        return real(src, dst)
+    monkeypatch.setattr(workspace.os, 'replace', flaky)
+    with pytest.raises(workspace.WorkspaceError, match='rolled back'):
+        workspace.apply('tx1')
+    assert tree_state(origin) == before
+    assert not list(origin.rglob('*.lw-*')) and not workspace.journal_path('tx1').exists()
+    assert workspace.read_record('tx1')['state'] == 'ready'
+    monkeypatch.setattr(workspace.os, 'replace', real)
+    assert sorted(workspace.apply('tx1')['applied']) == ['src/a.py', 'src/old.py', 'theme.py']
+
+def test_a_scope_error_is_raised_before_any_file_is_written(origin):
+    three_file_job(origin, 'tx2')
+    before = tree_state(origin)
+    record = workspace.read_record('tx2')
+    record['changed'] = ['src/a.py', 'theme.py', '../escape.py']
+    record['result']['../escape.py'] = None
+    record['base']['../escape.py'] = None
+    workspace.write_record('tx2', record)
+    with pytest.raises(ScopeError):
+        workspace.apply('tx2')
+    assert tree_state(origin) == before
+
+def test_a_file_changed_between_backup_and_replace_aborts_and_restores(origin, monkeypatch):
+    three_file_job(origin, 'tx3')
+    real = workspace.os.replace
+    done = {'n': 0}
+    def racing(src, dst):
+        if str(src).endswith('.lw-apply'):
+            done['n'] += 1
+            if done['n'] == 1:  # someone edits the second file after the first replace
+                (origin / 'src' / 'old.py').write_text('legacy = "user edit"\n')
+        return real(src, dst)
+    monkeypatch.setattr(workspace.os, 'replace', racing)
+    with pytest.raises(workspace.WorkspaceError, match='changed while applying'):
+        workspace.apply('tx3')
+    assert (origin / 'src' / 'a.py').read_text() == 'x = 1\n'
+    assert (origin / 'src' / 'old.py').read_text() == 'legacy = "user edit"\n'
+
+def test_recover_rolls_back_a_journal_left_by_a_crash(origin, monkeypatch):
+    three_file_job(origin, 'tx4')
+    before = tree_state(origin)
+    real, seen, saved, real_restore = workspace.os.replace, {'n': 0}, {}, workspace._restore
+    def crash(src, dst):
+        if str(src).endswith('.lw-apply'):
+            seen['n'] += 1
+            if seen['n'] == 2:
+                saved['journal'] = workspace.journal_path('tx4').read_text()
+                raise KeyboardInterrupt  # the process dies here
+        return real(src, dst)
+    monkeypatch.setattr(workspace.os, 'replace', crash)
+    monkeypatch.setattr(workspace, '_restore', lambda *a, **k: None)
+    with pytest.raises(KeyboardInterrupt):
+        workspace.apply('tx4')
+    workspace.journal_path('tx4').write_text(saved['journal'])  # a real crash would not have run the cleanup
+    assert tree_state(origin) != before
+    monkeypatch.setattr(workspace.os, 'replace', real)
+    monkeypatch.setattr(workspace, '_restore', real_restore)
+    assert workspace.recover() == ['tx4']
+    assert tree_state(origin) == before and not workspace.journal_path('tx4').exists()
+
+def test_a_failed_revert_is_rolled_back_and_the_job_stays_applied(origin, monkeypatch):
+    three_file_job(origin, 'tx5')
+    workspace.apply('tx5')
+    applied = tree_state(origin)
+    real, seen = workspace.os.replace, {'n': 0}
+    def flaky(src, dst):
+        if str(src).endswith('.lw-apply'):
+            seen['n'] += 1
+            if seen['n'] == 2:
+                raise OSError('io error')
+        return real(src, dst)
+    monkeypatch.setattr(workspace.os, 'replace', flaky)
+    with pytest.raises(workspace.WorkspaceError, match='rolled back'):
+        workspace.revert('tx5')
+    assert tree_state(origin) == applied and workspace.read_record('tx5')['state'] == 'applied'
+    monkeypatch.setattr(workspace.os, 'replace', real)
+    assert workspace.revert('tx5')['state'] == 'reverted' and tree_state(origin)['src/a.py'] == 'x = 1\n'
+
+# Shared-clone snapshots -------------------------------------------------------------------------------------------------
+
+def tree_files(root):
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(Path(root).rglob('*')) if p.is_file() and '.git' not in p.relative_to(root).parts
+            and '__pycache__' not in p.parts}
+
+def test_a_git_snapshot_matches_the_users_tree_including_uncommitted_state(origin):
+    (origin / '.gitignore').write_text('ignored.txt\n')
+    (origin / 'keep.txt').write_text('tracked\n')
+    (origin / 'gone.txt').write_text('will be deleted\n')
+    git(origin, 'add', '-A'); git(origin, 'commit', '-qm', 'more')
+    (origin / 'src' / 'a.py').write_text('x = 99\n')              # unstaged edit
+    (origin / 'theme.py').write_text('BLUE = 5\n'); git(origin, 'add', 'theme.py')  # staged edit
+    (origin / 'new.py').write_text('fresh = 1\n')                 # untracked
+    (origin / 'gone.txt').unlink()                                # deleted, unstaged
+    (origin / 'ignored.txt').write_text('ignored\n')              # ignored: not copied
+    (origin / '.env').write_text('SECRET=1\n')                    # untracked secret: not copied
+    (origin / 'link.py').symlink_to('new.py')                     # symlink: not copied
+    record = workspace.create(origin, 'git1', ['src/a.py'])
+    work = work_of('git1')
+    expected = {k: v for k, v in tree_files(origin).items() if k not in ('ignored.txt', '.env', 'link.py')}
+    assert tree_files(work) == expected
+    assert not (work / 'link.py').exists() and not (work / '.env').exists() and record['files'] == len(expected)
+    assert git(work, 'status', '--porcelain') == '' and 'baseline' in git(work, 'log', '-1', '--format=%s')
+
+def test_a_git_snapshot_writes_nothing_into_the_users_git_dir_and_patches_cleanly(origin):
+    def snapshot():
+        return sorted(str(p.relative_to(origin / '.git')) for p in (origin / '.git').rglob('*') if p.is_file() and 'index' not in p.name)
+    before = snapshot()
+    workspace.create(origin, 'git2', ['src/a.py'])
+    assert snapshot() == before
+    (work_of('git2') / 'src' / 'a.py').write_text('x = 2\n')
+    patch = workspace.patch('git2')
+    assert '-x = 1' in patch and '+x = 2' in patch and 'theme.py' not in patch
+    assert workspace.apply('git2')['applied'] == ['src/a.py'] and (origin / 'src' / 'a.py').read_text() == 'x = 2\n'
+
+def test_a_git_snapshot_has_no_size_limit_but_a_plain_directory_does(tmp_path, origin, monkeypatch):
+    monkeypatch.setattr(workspace, 'MAX_TOTAL', 10)
+    workspace.create(origin, 'git3', ['src/a.py'])  # git work tree: shared clone, no cap
+    plain = tmp_path / 'plain'
+    plain.mkdir()
+    (plain / 'big.txt').write_text('x' * 100)
+    with pytest.raises(workspace.WorkspaceError, match='narrower repository'):
+        workspace.create(plain, 'plain1', ['big.txt'])
+
+def test_a_repo_without_commits_falls_back_to_copying(tmp_path):
+    repo = tmp_path / 'fresh'
+    repo.mkdir()
+    git(repo, 'init', '-q')
+    (repo / 'a.py').write_text('x = 1\n')
+    workspace.create(repo, 'git4', ['a.py'])
+    assert (work_of('git4') / 'a.py').read_text() == 'x = 1\n'

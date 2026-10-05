@@ -139,15 +139,13 @@ def test_board_request_validation(kw,tmp_path):
     with pytest.raises(ValueError):JobRequest(**{'role':'personal','task':'x','idempotency_key':'k','board':True,**kw})
     with pytest.raises(ValueError):JobRequest(role='personal',task='x',idempotency_key='k',board_mode='lite')
 
-def test_cli_board_flags(repo,monkeypatch):
+def test_cli_board_flags_are_refused_as_retired(repo,monkeypatch,capsys):
     from hub import client
-    seen=[]
-    def call(method,path,data=None):seen.append(data);return {'id':'a'*32,'state':'queued'}
-    monkeypatch.setattr(client,'call',call);monkeypatch.chdir(repo)
-    monkeypatch.setattr(sys,'argv',['local-worker','--board','--board-mode','full','--async','Find x']);cli.main()
-    request=JobRequest.model_validate(seen[0]);assert request.board and request.board_mode=='full' and request.timeout==300 and not request.needs_answer_review()
-    monkeypatch.setattr(sys,'argv',['local-worker','--board','--extended','--async','Find x'])
-    with pytest.raises(SystemExit):cli.main()
+    monkeypatch.setattr(client,'call',lambda *a,**k:pytest.fail('a retired flag must not reach the service'));monkeypatch.chdir(repo)
+    for argv in (['--board'],['--board-mode','full']):
+        monkeypatch.setattr(sys,'argv',['local-worker',*argv,'--async','Find x'])
+        with pytest.raises(SystemExit):cli.main()
+        assert 'retired' in capsys.readouterr().err
 
 # Engine-side structured phases ---------------------------------------------------------------------------------------
 

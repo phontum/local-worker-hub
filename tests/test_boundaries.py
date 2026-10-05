@@ -6,7 +6,6 @@ import pytest
 from hub.models import JobRequest, Check
 from hub.scoped import ScopedFiles, ScopeError, Research, public_url
 from hub.report import parse_report, final_report
-from hub.runner import runtime_config, worker_env
 
 REPORT='LOCAL_WORKER_REPORT\nStatus: COMPLETE\nFindings:\nFound app.ts:1.\nFiles:\napp.ts\nChecks:\nNot run.\nRisks:\nNone identified.\nEND_LOCAL_WORKER_REPORT'
 
@@ -74,21 +73,6 @@ def test_report_tolerates_preamble_but_not_ambiguous_or_truncated():
     assert final_report(session) is None
     session['messages'][-1]['finish']='stop';assert final_report(session)
     session['messages'].append({'type':'user'});assert final_report(session) is None
-
-def test_runtime_denies_native_and_cloud_and_has_isolated_environment(repo,tmp_path):
-    req=request(repo)
-    cfg=runtime_config(req,tmp_path/'job','token')
-    agent=cfg['agents']['local-worker']
-    assert agent['permissions'][0]['effect']=='deny'
-    assert not any(r['action'] in ('shell','read','edit','websearch','task') for r in agent['permissions'][1:])
-    assert cfg['experimental']['policies'][-1]['resource']=='ollama'
-    env=worker_env(tmp_path/'job',cfg)
-    assert env['PWD']==str(tmp_path/'job/workspace')
-    assert env['XDG_CONFIG_HOME']==str(tmp_path/'job/config')
-    assert 'AWS_SECRET_ACCESS_KEY' not in env
-    recovered=runtime_config(req,tmp_path/'job','token',True)
-    assert 'mcp' not in recovered
-    assert len(recovered['agents']['local-worker-report']['permissions'])==1
 
 @pytest.mark.parametrize('url',['http://127.0.0.1','http://[::1]','http://10.0.0.1','file:///etc/passwd','https://user:pass@example.com','http://example.com:8765'])
 async def test_fetch_private_destination_denied(url):

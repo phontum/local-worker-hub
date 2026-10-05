@@ -10,10 +10,6 @@ describe('jobBody', () => {
   it('maps every override to its JobRequest field', () => {
     const body = jobBody(s({ mode: 'extended', model: 'qwen', context: '32768', thinking: 'off', review: 'on', verify: true, agentLoop: true }), 'x', [], 'k');
     expect(body).toMatchObject({ execution_preset: 'extended', model: 'qwen', model_context: 32768, model_thinking: false, review_pass: true, verify: true, agent_loop: true, timeout: 300 });
-    expect(body).not.toHaveProperty('board');
-  });
-  it('sends a board with its mode and no model', () => {
-    expect(jobBody(s({ board: true, boardMode: 'full' }), 'x', [], 'k')).toMatchObject({ board: true, board_mode: 'full', timeout: 300 });
   });
   it('omits empty history and bounds long history', () => {
     expect(jobBody(s(), 'x', [], 'k')).not.toHaveProperty('history');
@@ -36,12 +32,6 @@ describe('conflicts (mirrors hub.models validation)', () => {
     expect(conflicts(s())).toEqual([]);
     expect(conflicts(s({ mode: 'extended', context: '32768', verify: true }))).toEqual([]);
   });
-  it('rejects a board with a non-work mode, 32K context or a chosen model', () => {
-    expect(conflicts(s({ board: true, mode: 'small' }))).toHaveLength(1);
-    expect(conflicts(s({ board: true, mode: 'extended' }))).toHaveLength(1);
-    expect(conflicts(s({ board: true, context: '32768' }))).toHaveLength(1);
-    expect(conflicts(s({ board: true, model: 'gemma' }))).toHaveLength(1);
-  });
   it('rejects extended mode with 16K context', () => {
     expect(conflicts(s({ mode: 'extended', context: '16384' }))).toHaveLength(1);
   });
@@ -54,7 +44,6 @@ describe('timeoutSeconds (mirrors hub.models.default_timeout)', () => {
     expect(timeoutSeconds(s({ verify: true }))).toBe(300);
     expect(timeoutSeconds(s({ review: 'on' }))).toBe(300);
     expect(timeoutSeconds(s({ review: 'off' }))).toBe(120);
-    expect(timeoutSeconds(s({ board: true }))).toBe(300);
   });
 });
 
@@ -63,7 +52,6 @@ describe('cliFlags and summary', () => {
     expect(cliFlags(s())).toBe('local-worker');
     expect(cliFlags(s({ mode: 'small', model: 'qwen', context: '16384', thinking: 'on', review: 'off', agentLoop: true }))).toBe(
       'local-worker --preset small --model qwen --model-context 16384 --model-thinking on --no-review --agent-loop');
-    expect(cliFlags(s({ board: true, boardMode: 'lite' }))).toBe('local-worker --board --board-mode lite');
   });
   it('summarises a non-default setup in one line', () => {
     expect(summary(s())).toBe('Standard · default model');

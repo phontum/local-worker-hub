@@ -122,8 +122,11 @@ def test_non_git_directories_are_copied_with_exclusions(tmp_path):
     assert (work / '.venv').is_symlink() and not os.path.exists(work / '.git' / 'worktrees')
 
 
-def test_oversized_repositories_are_refused_with_a_clear_error(origin, monkeypatch):
+def test_oversized_plain_directories_are_refused_with_a_clear_error(tmp_path, monkeypatch):
+    plain = tmp_path / 'plain'
+    plain.mkdir()
+    (plain / 'a.py').write_text('x = 1\n' * 10)
     monkeypatch.setattr(workspace, 'MAX_TOTAL', 5)
     with pytest.raises(workspace.WorkspaceError, match='larger than'):
-        workspace.create(origin, 'job9', ['a.py'])
+        workspace.create(plain, 'job9', ['a.py'])
     assert not (workspace.ROOT / 'job9').exists()

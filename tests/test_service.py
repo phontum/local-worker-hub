@@ -17,7 +17,7 @@ def test_idempotency_queue_cancel_review_and_restart(store,repo):
     assert store.next() is None
     store.finish(second['id'],'completed',{'usage':{'output':2}})
     assert store.get(second['id'])['state']=='cancelled'
-    store.review(job['id'],Review(decision='takeover',notes='Took over: the edit was cut off',baseline_frontier_tokens=100,delegated_frontier_tokens=120))
+    store.review(job['id'],Review(decision='takeover',notes='Took over: the edit was cut off',reason='truncated',baseline_frontier_tokens=100,delegated_frontier_tokens=120))
     assert store.summary()['estimated_frontier_tokens_avoided']==-20
     assert store.summary()['api_equivalent_usd'] is None
 
@@ -109,3 +109,12 @@ def test_the_inference_gateway_allows_an_8192_output_budget_only_for_jobs_that_a
         with TestClient(create_app(store,start_workers=False),base_url='http://127.0.0.1:8765') as c:
             response=c.post(f"/inference/{job['id']}/chat",json={'model':model_name('gemma'),'stream':True,'messages':[],'options':{'num_ctx':16384,'num_predict':budget}},headers=headers)
         assert response.status_code==expected,(key,response.status_code)
+
+def test_retired_board_and_repository_agent_loop_are_refused(store,repo):
+    with TestClient(create_app(store,start_workers=False),base_url='http://127.0.0.1:8765') as c:
+        headers={'Authorization':'Bearer '+initialize()}
+        board=c.post('/api/jobs',headers=headers,json={'role':'personal','task':'cheapest 5070','idempotency_key':'b1','board':True})
+        assert board.status_code==410 and 'retired' in board.json()['detail']
+        loop=c.post('/api/jobs',headers=headers,json=task(repo,'loop',agent_loop=True).model_dump())
+        assert loop.status_code==409 and 'public web roles' in loop.json()['detail']
+        assert c.post('/api/jobs',headers=headers,json={'role':'personal','task':'hi','idempotency_key':'ok1','agent_loop':True}).status_code==200

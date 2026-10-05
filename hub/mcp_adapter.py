@@ -78,16 +78,16 @@ def create_server():
                    model_context: int | None=None, model_thinking: bool | None=None,
                    execution_preset: str | None=None, read_paths: list[str] | None=None,
                    evidence_job_ids: list[str] | None=None, handoff_id: str | None=None,
-                   review_pass: bool | None=None, board: bool=False, board_mode: str | None=None, verify: bool=False, agent_loop: bool=False, model: str | None=None) -> dict:
+                   review_pass: bool | None=None, verify: bool=False, agent_loop: bool=False, model: str | None=None) -> dict:
         """Generic job submission. For common work prefer investigate_code, implement_change, fix_failing_test, add_regression_test and run_checks, which fix the safe defaults. Submit a bounded local task. Researcher accepts only a sanitized public brief; Editor requires exact file scope and always works in a private copy of the repository: review the patch and acceptance packet, then call apply_result or discard_result. kind names the delegation shape (find_code, explain, config_use, compare, check_requirement, mechanical, guard, regression_test, run_tests, fix_test): it checks the role, tunes the answer format and sets defaults (fix_test uses the implement workflow with one repair; regression_test requires the check that runs the new test and verifies that the test fails on the current code). Reuse the same key only for transport retries. Public web roles answer in plain language by default (about 30-60s). verify=true runs strict origin-proof research (slower, may end PARTIAL). board=true is a rarely useful anonymous multi-model deliberation (slower, FIFO queue); skip it when the task is already specified. The call returns immediately: continue other work, then poll get_job (it reports eta_seconds and queue wait) and read get_result."""
         request=JobRequest(role=role,task=task,repo=repo,allowed_paths=allowed_paths or [],checks=checks or [],
             context=context,caller=caller,caller_session=caller_session,idempotency_key=idempotency_key,
-            timeout=timeout if timeout is not None else default_timeout(role,execution_preset,board,verify,bool(review_pass)),
+            timeout=timeout if timeout is not None else default_timeout(role,execution_preset,False,verify,bool(review_pass)),
             summary_mode=summary_mode,failure_policy=failure_policy,profile_hash=profile_hash,profile_ref=profile_ref,
             check_groups=check_groups or [],parameters=parameters or {},workflow=workflow,
             repair_attempts=repair_attempts,investigate_first=investigate_first,kind=kind,
             model_context=model_context,model_thinking=model_thinking,execution_preset=execution_preset,review_pass=review_pass,
-            read_paths=read_paths or [],evidence_job_ids=evidence_job_ids or [],handoff_id=handoff_id,board=board,board_mode=board_mode,verify=verify,agent_loop=agent_loop,model=model)
+            read_paths=read_paths or [],evidence_job_ids=evidence_job_ids or [],handoff_id=handoff_id,verify=verify,agent_loop=agent_loop,model=model)
         result=call('POST','/api/jobs',request.model_dump())
         return {'id':result['id'],'state':result['state'],'role':result['request']['role']}
 
@@ -132,9 +132,9 @@ def create_server():
         return call('POST',job_path(job_id)+'/summarize',{'idempotency_key':idempotency_key,'timeout':timeout,'caller':'mcp'})
 
     @server.tool(annotations=WRITE)
-    def apply_result(job_id: str, accept_removals: bool=False, revalidate: bool=False, run_checks: bool=False) -> dict:
-        """Apply a finished Editor job's patch to the repository. The worker edits a private copy; this writes only the authorized files, and refuses (listing conflicts) if any of them changed in the repository since the job started. Review patch.diff and the acceptance packet first. Files the job removed are applied only if it declared them in delete_paths and accept_removals is true. The result lists stale_dependencies (read_paths files that changed since the job started). revalidate=true first re-runs the job's approved checks on your tree as it is now plus the patch and writes nothing if they fail; run_checks=true runs them in your tree after the write. Both run the checks synchronously, so keep them short."""
-        return call('POST',job_path(job_id)+'/apply',{'accept_removals':accept_removals,'revalidate':revalidate,'run_checks':run_checks})
+    def apply_result(job_id: str, accept_removals: bool=False, revalidate: bool=False, run_checks: bool=False, accept_stale: bool=False) -> dict:
+        """Apply a finished Editor job's patch to the repository. The worker edits a private copy; this writes only the authorized files, and refuses (listing conflicts) if any of them changed in the repository since the job started. Review patch.diff and the acceptance packet first. Files the job removed are applied only if it declared them in delete_paths and accept_removals is true. The result lists stale_dependencies (files the job read, including read_paths directories and files cited by attached evidence jobs, that changed since it started); apply refuses while any are stale unless revalidate=true passes or accept_stale=true after you reviewed them. revalidate=true first re-runs the job's approved checks on your tree as it is now plus the patch and writes nothing if they fail; run_checks=true runs them in your tree after the write. Both run the checks synchronously, so keep them short."""
+        return call('POST',job_path(job_id)+'/apply',{'accept_removals':accept_removals,'revalidate':revalidate,'run_checks':run_checks,'accept_stale':accept_stale})
 
     @server.tool(annotations=WRITE)
     def revert_result(job_id: str) -> dict:
@@ -157,13 +157,69 @@ def create_server():
                       delegated_frontier_tokens: int | None=None, baseline_frontier_cost: float | None=None,
                       delegated_frontier_cost: float | None=None, measurement_source: str='measured',
                       task_outcome: str | None=None, review_effort_seconds: int | None=None, reason: str | None=None) -> dict:
-        """Record frontier acceptance/rejection/takeover. A rejected or takeover review must say why in notes (at least 10 characters) and should give a reason (truncated, wrong_edit, oversized, no_change, check_failed, scope, other): real failures become regression cases. Baselines must include orchestration, review, retries and takeover usage."""
+        """Record frontier acceptance/rejection/takeover. A rejected or takeover review must say why in notes (at least 10 characters) and should give a reason (truncated, wrong_edit, oversized, no_change, check_failed, scope, wrong_localization, context_missing, other): real failures become regression cases. Baselines must include orchestration, review, retries and takeover usage."""
         review=Review(decision=decision,notes=notes,baseline_frontier_tokens=baseline_frontier_tokens,
             delegated_frontier_tokens=delegated_frontier_tokens,baseline_frontier_cost=baseline_frontier_cost,
             delegated_frontier_cost=delegated_frontier_cost,measurement_source=measurement_source,
             task_outcome=task_outcome,review_effort_seconds=review_effort_seconds,reason=reason)
         job=call('POST',job_path(job_id)+'/review',review.model_dump())
         return {'id':job['id'],'review':job['review']}
+
+    @server.tool(annotations=WRITE)
+    def delegate(repo: str, spec: dict, idempotency_key: str | None=None) -> dict:
+        """Submit a structured DelegationSpec: goal, kind, targets [{path, symbol?, lines?}], changes [{description, mappings: [{old, new}]}], invariants and acceptance (criteria: {kind: file_unchanged|symbol_exists|symbol_absent|no_new_files|check_passes|text, ...}; the mechanical kinds are verified by the host after the edit and unmet ones make a COMPLETE job PARTIAL, text ones are listed for you), evidence {job_ids, refs}, scope {read, edit, delete}, checks (approved argv), preset. Editing specs need scope.edit; fix_test and regression_test need a check. It runs the same Investigator/Editor/Validator pipelines as the other tools, so read results and apply_result as usual. The result's request_spec echoes what was understood."""
+        from .spec import DelegationSpec, compile_spec
+        compiled=compile_spec(DelegationSpec.model_validate(spec),repo,'mcp',idempotency_key)
+        out=submit_request(compiled,NEXT_EDITOR if compiled.role=='editor' else NEXT_READ)
+        return out|{'task_text':compiled.task[:1500]}
+
+    @server.tool(annotations=WRITE)
+    def record_outcome(job_id: str) -> dict:
+        """Call after you finished your own edits on a rejected or taken-over Editor job: the hub records the diff you finally shipped (the authorized files as the worker's snapshot saw them against your tree now), which is what later router and retrieval evaluation learns from. Metadata and a local diff file only; nothing leaves the machine."""
+        return call('POST',job_path(job_id)+'/outcome')
+
+    def intel(tool, repo, **arguments):
+        return call('POST','/api/intel/'+tool,{'repo':repo,**{k:v for k,v in arguments.items() if v is not None}})
+
+    @server.tool(annotations=READ)
+    def find_symbol(repo: str, name: str, kind: str | None=None, limit: int=20) -> dict:
+        """Where a function, class, method or variable is defined (path and line range). Deterministic, zero model tokens, answers immediately. precision says how much to trust it: 'syntactic' is a parsed exact-name match, 'lexical' a name-contains fallback."""
+        return intel('find_symbol',repo,name=name,kind=kind,limit=limit)
+
+    @server.tool(annotations=READ)
+    def find_references(repo: str, name: str, limit: int=40) -> dict:
+        """Lines that use a name outside its own definition. Name-based (same-named symbols are not told apart); zero model tokens."""
+        return intel('find_references',repo,name=name,limit=limit)
+
+    @server.tool(annotations=READ)
+    def find_implementations(repo: str, name: str, limit: int=40) -> dict:
+        """Classes that extend or implement a class, interface or trait (Python, TS/JS, Rust impl); Go interfaces are structural and not found. Zero model tokens."""
+        return intel('find_implementations',repo,name=name,limit=limit)
+
+    @server.tool(annotations=READ)
+    def callers(repo: str, name: str, limit: int=40) -> dict:
+        """Call sites of a function or method with the definition each sits in, matched by callee name. Zero model tokens."""
+        return intel('callers',repo,name=name,limit=limit)
+
+    @server.tool(annotations=READ)
+    def callees(repo: str, name: str, limit: int=40, path: str | None=None) -> dict:
+        """What a function calls, resolved to definitions by name; pass path when several definitions share the name. Zero model tokens."""
+        return intel('callees',repo,name=name,limit=limit,path=path)
+
+    @server.tool(annotations=READ)
+    def diagnostics(repo: str, paths: list[str] | None=None, limit: int=60) -> dict:
+        """Syntax errors and unresolved relative imports for the given files (or the whole repository). No type checking: run an approved check for that. Zero model tokens."""
+        return intel('diagnostics',repo,paths=paths,limit=limit)
+
+    @server.tool(annotations=READ)
+    def symbol_context(repo: str, name: str, budget: int=6000, path: str | None=None) -> dict:
+        """One call for a symbol: its definition and body, signature, callers, callees and the test files that mention it, within a character budget. Zero model tokens."""
+        return intel('symbol_context',repo,name=name,budget=budget,path=path)
+
+    @server.tool(annotations=READ)
+    def outline(repo: str, path: str) -> dict:
+        """The symbols defined in a file (name, kind, line range) and its imports with resolved files. Zero model tokens."""
+        return intel('outline',repo,path=path)
 
     return server
 

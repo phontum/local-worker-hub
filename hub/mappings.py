@@ -33,11 +33,12 @@ def literal(old, texts):
 def count(needle, texts):
     return sum(text.count(needle) for text in texts)
 
-def verify(task, before, after):
-    """`before` and `after` map each authorized path to its text. Returns {'checked', 'unverifiable', 'unmet': [...]}."""
+def verify(task, before, after, pairs=None):
+    """`before` and `after` map each authorized path to its text; `pairs` (typed mappings from a DelegationSpec) replace the ones parsed from the task text.
+    Returns {'checked', 'unverifiable', 'unmet': [...]}."""
     before_texts, after_texts = list(before.values()), list(after.values())
     unmet, checked, unverifiable = [], 0, 0
-    for old, new in extract(task):
+    for old, new in (extract(task) if pairs is None else pairs):
         found = literal(old, before_texts)
         if found is None:
             unverifiable += 1

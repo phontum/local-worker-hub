@@ -30,6 +30,8 @@ files. After two unsuccessful local attempts, take over.
   private editor workspace with guarded apply, the acceptance packet, and parsing of test/lint output into failures.
 - `hub/textedit.py`, `hub/jsonedit.py`, `hub/contextpack.py`, `hub/editgate.py`, `hub/mappings.py`, `hub/incident.py`: strict transactional edit protocol (continuation after a cut-off reply, line-anchored
   matching, an experimental JSON format), context packing for the edit prompt, the advisory complexity gate with proposed split, post-edit `old -> new` verification, and metadata-only incident export.
+- `hub/intel/`, `hub/spec.py`, `hub/execctx.py`, `hub/outcomes.py`: Tier-0 code tools behind a provider interface (CodeIndex today), the DelegationSpec and its host-verified criteria,
+  failure-frame context for `fix_test`, and delegation outcome rows, final frontier diffs and acceptance statistics.
 - `hub/scoped.py`, `hub/evidence.py`: scoped tools and freshness/provenance checks.
 - `hub/public_page.py`, `hub/web_provider.py`, `hub/web_verification.py`: public
   retrieval, search-provider adapters and current-source verification.
@@ -53,7 +55,7 @@ files. After two unsuccessful local attempts, take over.
   blocks applied through ScopedFiles). Keep host-written citations, the unit/time normalizer and
   the scoped write guards. `--verify`, `--review` and `--agent-loop` keep the older tool loop.
   Coding: passing approved checks decide; the local review is opt-in and advisory.
-- `--board` is opt-in and rarely useful (see docs/WORKFLOWS.md). Proposers are tools-off and
+- `--board` is retired and refused (see docs/WORKFLOWS.md); its code stays until moved to `legacy/`. Proposers were tools-off and
   never see each other; no phase combines repository and web access. Preserve the literal
   task-quote anchors, host-computed drift report and shared web ledger. No critic or repair.
 - Investigator reads are scoped, and its `path:line` references are verified by the host against lines it read. Editor writes require exact

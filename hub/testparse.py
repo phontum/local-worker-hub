@@ -9,9 +9,37 @@ import re
 ANSI = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 MAX_FAILURES = 50
 MAX_MESSAGE = 300
+MAX_FRAMES = 12
+FRAME_PATTERNS = (
+    re.compile(r'(?m)^(\S+?\.py):(\d+): (?:in (\w+)|[A-Za-z_]|$)'),                      # pytest short and long tracebacks
+    re.compile(r'(?m)^\s*File "([^"]+\.py)", line (\d+), in (\w+)'),                    # native Python tracebacks
+    re.compile(r'(?m)^\s*(?:at (?:async )?(?:(\S+) \()?|❯ )([^\s()]+\.(?:[cm]?[jt]sx?)):(\d+)(?::\d+)?\)?'),  # Node and vitest stacks (function, file, line)
+)
+FOREIGN = ('site-packages', 'node_modules', 'dist-packages', '<frozen', 'node:internal', '/lib/python', '/usr/lib')
 
-def failure(tool, test_id, file=None, line=None, message=''):
-    return {'tool': tool, 'test_id': test_id, 'file': file, 'line': line, 'message': ' '.join(message.split())[:MAX_MESSAGE]}
+def frames_of(text):
+    """Stack frames [{file, line, function}] found in a failure's output, in the order printed (outermost call first for Python, innermost first for Node),
+    without library frames and without repeats."""
+    found = []
+    for position, pattern in enumerate(FRAME_PATTERNS):
+        for m in pattern.finditer(text):
+            if position == 2:
+                function, file, line = m.group(1), m.group(2), m.group(3)
+            else:
+                file, line, function = m.group(1), m.group(2), m.group(3) if m.lastindex and m.lastindex >= 3 else None
+            if any(mark in file for mark in FOREIGN):
+                continue
+            found.append((m.start(), {'file': file, 'line': int(line), 'function': function, 'order': 'innermost_first' if position == 2 else 'outermost_first'}))
+    out, seen = [], set()
+    for _, frame in sorted(found, key=lambda item: item[0]):
+        key = (frame['file'], frame['line'])
+        if key not in seen:
+            seen.add(key)
+            out.append(frame)
+    return out[:MAX_FRAMES]
+
+def failure(tool, test_id, file=None, line=None, message='', frames=None):
+    return {'tool': tool, 'test_id': test_id, 'file': file, 'line': line, 'message': ' '.join(message.split())[:MAX_MESSAGE], 'frames': frames or []}
 
 def pytest_counts(text):
     found = re.findall(r'(?m)^=*\s*((?:\d+ \w+(?:, )?)+)(?: \([^)]*\))? in [\d.]+s', text)
@@ -25,14 +53,13 @@ def parse_pytest(text):
         name = header.split('.')[-1]
         at = re.findall(r'(?m)^(\S+?\.py):(\d+): ', body)
         message = ' '.join(m.strip() for m in re.findall(r'(?m)^E\s+(.*)$', body) if m.strip())
-        sections[name] = (at[-1] if at else (None, None), message)
+        sections[name] = (at[-1] if at else (None, None), message, frames_of(body))
     out = []
     for kind, ident, brief in re.findall(r'(?m)^(FAILED|ERROR) (\S+?)(?: - (.*))?$', text):
-        file, line = sections.get(ident.split('::')[-1], ((None, None), ''))[0]
-        message = sections.get(ident.split('::')[-1], (None, ''))[1] or brief
-        out.append(failure('pytest', ident, file or ident.split('::')[0], int(line) if line else None, message))
+        (file, line), found_message, frames = sections.get(ident.split('::')[-1], ((None, None), '', []))
+        out.append(failure('pytest', ident, file or ident.split('::')[0], int(line) if line else None, found_message or brief, frames))
     if not out:
-        out = [failure('pytest', name, f, int(l) if l else None, m) for name, ((f, l), m) in sections.items()]
+        out = [failure('pytest', name, f, int(l) if l else None, m, fr) for name, ((f, l), m, fr) in sections.items()]
     return out, pytest_counts(text)
 
 def parse_vitest(text):
@@ -41,7 +68,7 @@ def parse_vitest(text):
         lines = block.splitlines()
         where = re.search(r'(?m)^ ❯ (\S+?):(\d+):\d+', block)
         message = next((l for l in lines[1:] if l.strip()), '')
-        out.append(failure('vitest', lines[0].strip(), where.group(1) if where else lines[0].split(' > ')[0].strip(), int(where.group(2)) if where else None, message))
+        out.append(failure('vitest', lines[0].strip(), where.group(1) if where else lines[0].split(' > ')[0].strip(), int(where.group(2)) if where else None, message, frames_of(block)))
     counts = {}
     summary = re.search(r'(?m)^\s*Tests\s+(.*?)\s*\((\d+)\)', text)
     if summary:
@@ -67,7 +94,7 @@ def parse_node_tap(text):
         location = re.search(r"location: '(.*?):(\d+):\d+'", body)
         error = re.search(r'error: \|-?\n((?:\s{4,}.*\n?)+)', body) or re.search(r"error: '?(.*?)'?\n", body)
         out.append(failure('node:test', match.group(1), location.group(1) if location else None, int(location.group(2)) if location else None,
-                           error.group(1) if error else ''))
+                           error.group(1) if error else '', frames_of(body)))
     counts = {k: int(n) for k, n in re.findall(r'(?m)^# (pass|fail|skipped|cancelled|todo) (\d+)$', text)}
     return out, counts
 
@@ -129,4 +156,7 @@ def parse(text, argv=None, root=None):
         for item in failures:
             if item['file'] and item['file'].startswith(prefix):
                 item['file'] = item['file'][len(prefix):]
+            for frame in item.get('frames', []):
+                if frame['file'].startswith(prefix):
+                    frame['file'] = frame['file'][len(prefix):]
     return {'tool': tool, 'counts': counts, 'failures': failures[:MAX_FAILURES], 'truncated': len(failures) > MAX_FAILURES}

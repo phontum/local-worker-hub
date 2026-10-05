@@ -49,3 +49,47 @@ def build(job, directory, include_notes=False):
     if include_notes and review:
         out['review']['notes'] = alias(review.get('notes', ''))
     return out
+
+def replies(directory):
+    """The model's raw edit replies of a job, in order, rebuilt from its private trace plus the per-turn records (finish reason, output tokens)."""
+    directory = Path(directory)
+    text, order = {}, []
+    trace = directory / 'trace.jsonl'
+    for line in trace.read_text().splitlines() if trace.is_file() else []:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get('kind') == 'content' and str(row.get('phase', '')).split('-')[0] in ('edit', 'work', 'repair'):
+            key = (row['phase'], row['step'])
+            if key not in text:
+                order.append(key)
+            text[key] = text.get(key, '') + row.get('text', '')
+    turns = [t for p in sorted(directory.glob('*.turns.json')) for t in json.loads(p.read_text()).get('turns', [])]
+    by_step = {t.get('step'): t for t in turns}
+    return [{'text': text[key], 'done_reason': (by_step.get(key[1]) or {}).get('done_reason') or 'stop',
+             'output_tokens': (by_step.get(key[1]) or {}).get('output_tokens') or 0} for key in order]
+
+def export_fixture(job, directory, base_dir, out):
+    """Write a replayable regression fixture: the task, the authorized files as they were before the job, the model's raw replies and the
+    metadata. This copies PRIVATE SOURCE and model output; unlike `build` it is for the user to review and trim before it is committed anywhere."""
+    request, out, base_dir = job['request'], Path(out), Path(base_dir)
+    if request.get('role') != 'editor':
+        raise ValueError('Only Editor jobs can become replay fixtures')
+    (out / 'files').mkdir(parents=True, exist_ok=True)
+    files = []
+    for path in request.get('allowed_paths', []):
+        if '..' in Path(path).parts or Path(path).is_absolute():
+            continue
+        source = base_dir / path
+        if source.is_file():
+            (out / 'files' / path).parent.mkdir(parents=True, exist_ok=True)
+            (out / 'files' / path).write_bytes(source.read_bytes())
+            files.append(path)
+    fixture = {'task': request.get('task', ''), 'allowed_paths': files, 'delete_paths': request.get('delete_paths', []),
+               'replies': replies(directory), 'recorded': (lambda r: r and {'decision': r['decision'], 'reason': r.get('reason')})(job.get('review')),
+               'recorded_status': (job.get('result') or {}).get('worker_status'),
+               'expected': None,  # set to {"status": "COMPLETE"|"PARTIAL", "changed": [paths]} once the incident is fixed; None checks only the safety invariants
+               'privacy': 'Contains private source and model output. Review before committing.'}
+    (out / 'fixture.json').write_text(json.dumps(fixture, indent=2) + '\n')
+    return fixture

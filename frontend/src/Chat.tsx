@@ -122,7 +122,7 @@ export function Chat({ onOpenJob }: { onOpenJob: (id: string) => void }) {
             </select>
           </Field>
           <Field label="Model" hint={models.length ? undefined : 'Model list unavailable; the configured default is used.'}>
-            <select value={settings.model} onChange={e => change({ model: e.target.value })} disabled={settings.board}>
+            <select value={settings.model} onChange={e => change({ model: e.target.value })}>
               <option value="">Default (roles.json)</option>
               {models.map(m => <option key={m.alias} value={m.alias} disabled={m.installed === false}>{m.alias} · {m.name}{m.installed === false ? ' (not installed)' : ''}</option>)}
             </select>
@@ -145,9 +145,6 @@ export function Chat({ onOpenJob }: { onOpenJob: (id: string) => void }) {
           <fieldset className="field toggles"><legend>Experiments</legend>
             <label><input type="checkbox" checked={settings.verify} onChange={e => change({ verify: e.target.checked })} /> Strict verify <small className="muted">slow, often PARTIAL</small></label>
             <label><input type="checkbox" checked={settings.agentLoop} onChange={e => change({ agentLoop: e.target.checked })} /> Older tool loop</label>
-            <label><input type="checkbox" checked={settings.board} onChange={e => change({ board: e.target.checked })} /> Board <small className="muted">rarely useful</small></label>
-            {settings.board && <select aria-label="Board mode" value={settings.boardMode} onChange={e => change({ boardMode: e.target.value as ChatSettings['boardMode'] })}>
-              <option value="lite">Lite</option><option value="full">Full</option></select>}
           </fieldset>
         </div>
         {!!problems.length && <ul className="error" role="alert">{problems.map(p => <li key={p}>{p}</li>)}</ul>}

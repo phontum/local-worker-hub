@@ -92,13 +92,61 @@ def main():
             value=seed_profiles()
         else:value=call('GET','/api/project-profile?'+urlencode({'repo':args.repo}))
         print(json.dumps(value,indent=2));return
+    if command=='spec':
+        p=argparse.ArgumentParser(description='DelegationSpec tools. check FILE: validate a spec and show the task it compiles to (offline). submit FILE: run it. draft TASK: show what the host understands of a natural-language task (no model).')
+        p.add_argument('command');p.add_argument('action',choices=['check','submit','draft']);p.add_argument('target');p.add_argument('--repo',default='.')
+        p.add_argument('--allow-path',action='append',default=[]);p.add_argument('--read-path',action='append',default=[]);p.add_argument('--kind');p.add_argument('--idempotency-key')
+        args=p.parse_args()
+        from .spec import DelegationSpec, compile_spec, draft_from_task
+        repo=str(Path(args.repo).resolve())
+        if args.action=='draft':
+            from .codeindex import CodeIndex
+            from .models import JobRequest
+            from .scoped import ScopedFiles
+            index=CodeIndex.load(ScopedFiles(JobRequest(role='investigator',repo=repo,task='draft',idempotency_key=__import__('uuid').uuid4().hex)))
+            print(draft_from_task(args.target,args.allow_path,args.read_path,args.kind,index=index).model_dump_json(indent=2,exclude_defaults=True));return
+        try:
+            spec=DelegationSpec.model_validate_json(Path(args.target).read_text())
+            request=compile_spec(spec,repo,'cli',args.idempotency_key)
+        except Exception as e:print(str(e),file=sys.stderr);sys.exit(2)
+        if args.action=='check':
+            print(f"role={request.role} kind={request.kind} edit={request.allowed_paths} read={request.read_paths} checks={len(request.checks)} workflow={request.workflow}\n\n{request.task}");return
+        try:value=call('POST','/api/jobs',request.model_dump());print(json.dumps({'id':value['id'],'state':value['state']}))
+        except Exception as e:print(str(e),file=sys.stderr);sys.exit(2)
+        return
+    if command=='intel':
+        from .intel.tools import TOOLS
+        p=argparse.ArgumentParser(description='Deterministic code intelligence (no model call): find_symbol, find_references, find_implementations, callers, callees, symbol_context, outline, diagnostics.')
+        p.add_argument('command');p.add_argument('tool',choices=sorted(TOOLS));p.add_argument('target',nargs='?',help='symbol name, or file path for outline');p.add_argument('--repo',default='.');p.add_argument('--path',help='disambiguate by defining file (callees, symbol_context)');p.add_argument('--limit',type=int)
+        args=p.parse_args()
+        body={'repo':str(Path(args.repo).resolve()),'limit':args.limit,'path':args.path}
+        if args.tool=='outline':body['path']=args.target
+        elif args.tool=='diagnostics':body['paths']=[args.target] if args.target else None
+        else:body['name']=args.target
+        try:print(json.dumps(call('POST','/api/intel/'+args.tool,{k:v for k,v in body.items() if v is not None}),indent=2))
+        except Exception as e:print(str(e),file=sys.stderr);sys.exit(2)
+        return
+    if command=='outcome':
+        p=argparse.ArgumentParser(description='Capture the diff you finally shipped after the worker snapshot, so a takeover or rejection can be learned from.');p.add_argument('command');p.add_argument('job_id')
+        args=p.parse_args()
+        from .mcp_adapter import job_path
+        print(json.dumps(call('POST',job_path(args.job_id)+'/outcome'),indent=2));return
+    if command=='stats':
+        p=argparse.ArgumentParser(description='Frontier acceptance by role and kind over reviewed delegations (benchmark jobs excluded).');p.add_argument('command');p.add_argument('--include-eval',action='store_true')
+        args=p.parse_args()
+        for item in call('GET','/api/outcomes?include_eval='+str(args.include_eval).lower())['by_kind']:
+            print(f"{item['role']:<12}{item['kind']:<18}reviewed {item['reviewed']:<4}accepted {item['accepted']:<4}rejected {item['rejected']:<4}takeover {item['takeover']:<4}rate {item['accept_rate']:.0%}  {item['reasons'] or ''}")
+        return
     if command=='incident':
-        p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('job_id');p.add_argument('--out');p.add_argument('--include-notes',action='store_true',help='Include the review notes (written by you; check them for private text first)')
+        p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('job_id');p.add_argument('--out');p.add_argument('--fixture',metavar='DIR',help='Write a replayable regression fixture (PRIVATE SOURCE and raw model replies) to DIR instead of the metadata-only export');p.add_argument('--include-notes',action='store_true',help='Include the review notes (written by you; check them for private text first)')
         args=p.parse_args()
         from .mcp_adapter import job_path
         from . import incident
         from .settings import STATE
         job=call('GET',job_path(args.job_id))
+        if args.fixture:
+            fixture=incident.export_fixture(job,STATE/'jobs'/job['id'],STATE/'workspaces'/job['id']/'base',args.fixture)
+            print(f"Wrote {args.fixture}/fixture.json with {len(fixture['allowed_paths'])} file(s) and {len(fixture['replies'])} reply(ies). It contains private source: review it before committing; move it to tests/data/incidents/ to make it a regression test.");return
         text=json.dumps(incident.build(job,STATE/'jobs'/job['id'],args.include_notes),indent=2)
         if args.out:Path(args.out).write_text(text+'\n');print('Wrote '+args.out)
         else:print(text)
@@ -121,15 +169,15 @@ def main():
     if command in ('apply','discard','revert'):
         p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('job_id')
         if command=='apply':
-            p.add_argument('--accept-removals',action='store_true');p.add_argument('--revalidate',action='store_true');p.add_argument('--run-checks',action='store_true')
+            p.add_argument('--accept-removals',action='store_true');p.add_argument('--revalidate',action='store_true');p.add_argument('--run-checks',action='store_true');p.add_argument('--accept-stale',action='store_true')
         args=p.parse_args()
         from .mcp_adapter import job_path
-        body={'accept_removals':args.accept_removals,'revalidate':args.revalidate,'run_checks':args.run_checks} if command=='apply' else None
+        body={'accept_removals':args.accept_removals,'revalidate':args.revalidate,'run_checks':args.run_checks,'accept_stale':args.accept_stale} if command=='apply' else None
         try:print(json.dumps(call('POST',job_path(args.job_id)+'/'+command,body),indent=2))
         except Exception as e:print(str(e),file=sys.stderr);sys.exit(2)
         return
     if command in ('status','result','cancel','review','wait'):
-        p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('job_id');p.add_argument('decision',nargs='?');p.add_argument('--notes',default='');p.add_argument('--reason',choices=['truncated','wrong_edit','oversized','no_change','check_failed','scope','other'])
+        p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('job_id');p.add_argument('decision',nargs='?');p.add_argument('--notes',default='');p.add_argument('--reason',choices=['truncated','wrong_edit','oversized','no_change','check_failed','scope','wrong_localization','context_missing','other'])
         p.add_argument('--full',action='store_true');p.add_argument('--measurement-source',choices=['measured','manual_estimate'],default='measured')
         p.add_argument('--timeout-seconds',type=int,default=25)
         p.add_argument('--task-outcome',choices=['completed','partial','blocked'])
@@ -220,10 +268,10 @@ def main():
     p.add_argument('--repair-attempts',type=int,default=0);p.add_argument('--investigate-first',action='store_true');p.add_argument('--in-place',action='store_true',help='Edit the repository directly instead of a private workspace');p.add_argument('--no-gate',action='store_true',help='Skip the complexity gate that refuses oversized Editor tasks');p.add_argument('--auto-split',action='store_true',help='Run the gate\'s proposed units one after another inside the job instead of refusing');p.add_argument('--no-continuation',action='store_true');p.add_argument('--continue-from',help='Job id of an earlier Editor job whose private workspace this job continues');p.add_argument('--model-output',type=int,choices=[4096,8192]);p.add_argument('--edit-format',choices=['text','json']);p.add_argument('--match-mode',choices=['substring','word','line']);p.add_argument('--kind',choices=['find_code','explain','config_use','compare','check_requirement','mechanical','guard','regression_test','run_tests','fix_test'],help='Delegation shape: checks the role and tunes defaults')
     p.add_argument('--model',help='Local model alias from the registry for every phase of this job (default: roles.json)')
     p.add_argument('--model-context',type=int,choices=[16384,32768]);p.add_argument('--model-thinking',choices=['on','off'])
-    p.add_argument('--board',action='store_true',help='Rarely useful: deliberate with an anonymous multi-model board before answering (public web roles; 300s budget, slower)')
+    p.add_argument('--board',action='store_true',help=argparse.SUPPRESS)
     p.add_argument('--agent-loop',dest='agent_loop',action='store_true',help='Use the older model-driven tool loop instead of the host pipelines (for comparison)')
     p.add_argument('--verify',action='store_true',help='Strict origin-proof research for public web roles: slower, may end PARTIAL, prints the evidence report')
-    p.add_argument('--board-mode',choices=['lite','full'],help='lite: skeptic + challenger proposals (default); full: four proposals')
+    p.add_argument('--board-mode',choices=['lite','full'],help=argparse.SUPPRESS)
     p.add_argument('--parameter',action='append',default=[],help='Explicit nonsecret profile parameter NAME=value')
     p.add_argument('prompt',nargs='*');args=p.parse_args()
     engineering=args.read_only or args.repo or args.read_path or args.allow_path or args.checks or args.context_file or args.profile_ref or args.profile_hash or args.evidence_job
@@ -233,7 +281,9 @@ def main():
     if args.extended and args.model_context==16384:p.error('--extended conflicts with --model-context 16384')
     if args.extended and args.execution_preset not in (None,'extended'):p.error('--extended conflicts with --preset')
     if role=='personal' and preset is None:preset='work'
-    if (args.board or args.board_mode) and (role not in ('personal','researcher') or preset in ('small','extended')):p.error('--board needs a public web role and the default work preset (fixed 16K contexts)')
+    if args.board or args.board_mode:p.error('--board was retired: it was 3-4x slower with no measured benefit. Use the default flow, or --verify for strict research.')
+
+    if args.agent_loop and role not in ('personal','researcher'):p.error('--agent-loop is only available for public web roles; repository roles use the host pipelines')
     if args.read_only and role!='investigator':p.error('--read-only selects Investigator')
     if args.write and role!='editor':p.error('--write selects Editor')
     if not args.prompt and sys.stdin.isatty():p.error('Supply the task through arguments or stdin')
