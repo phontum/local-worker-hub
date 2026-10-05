@@ -232,7 +232,7 @@ execute only your bounded assignment and return the report; do not delegate agai
 
 def prepare():
     initialize()
-    from .profiles import seed_profiles
+    from .skills.coding.validation.profiles import seed_profiles
     print('Project profiles:',seed_profiles())
     from .history import import_history
     from .store import Store

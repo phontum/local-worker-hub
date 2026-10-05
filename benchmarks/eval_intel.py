@@ -17,8 +17,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from hub.intel.lexical import LexicalProvider  # noqa: E402
-from hub.intel.lsp import LspProvider, approved_servers  # noqa: E402
+from hub.skills.coding.intelligence.intel.lexical import LexicalProvider  # noqa: E402
+from hub.skills.coding.intelligence.intel.lsp import LspProvider  # noqa: E402
+from hub.skills.coding.validation.profiles import lsp_servers  # noqa: E402
 from hub.models import JobRequest  # noqa: E402
 from hub.scoped import ScopedFiles  # noqa: E402
 
@@ -71,7 +72,7 @@ def main():
     args = parser.parse_args()
     files = ScopedFiles(JobRequest(role='investigator', repo=str(ROOT), task='intel eval', idempotency_key=uuid.uuid4().hex))
     if args.provider == 'lsp':
-        servers = {'python': args.lsp_command.split()} if args.lsp_command else approved_servers(str(ROOT))
+        servers = {'python': args.lsp_command.split()} if args.lsp_command else lsp_servers(str(ROOT))
         if not servers:
             sys.exit('No language server is approved for this repository (add `lsp` to its reviewed project profile); nothing was measured.')
         make = lambda: LspProvider(files, servers)  # noqa: E731

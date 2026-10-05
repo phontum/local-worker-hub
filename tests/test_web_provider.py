@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from hub import web_provider
+from hub.skills.research import web_provider
 from hub.scoped import Research
 
 
@@ -68,7 +68,7 @@ async def test_langsearch_full_text_reuse_not_snippet_promotion(monkeypatch):
 def test_exa_rate_limit_inside_a_task_group_becomes_provider_unavailable(monkeypatch):
     import asyncio
     from hub.scoped import Research
-    from hub.web_provider import ProviderUnavailable
+    from hub.skills.research.web_provider import ProviderUnavailable
     async def exa_call(self, name, args):
         raise ExceptionGroup('unhandled errors in a TaskGroup', [ProviderUnavailable('Exa free endpoint is rate-limited')])
     monkeypatch.setattr(Research, 'exa_call', exa_call)
@@ -79,7 +79,7 @@ def test_nested_http_429_and_cancellation_in_a_group(monkeypatch):
     import asyncio
     import httpx
     from hub.scoped import Research
-    from hub.web_provider import ProviderUnavailable
+    from hub.skills.research.web_provider import ProviderUnavailable
     response = httpx.Response(429, request=httpx.Request('POST', 'https://mcp.exa.ai/mcp'))
     async def limited(self, name, args):
         raise ExceptionGroup('g', [ExceptionGroup('inner', [httpx.HTTPStatusError('too many', request=response.request, response=response)])])
@@ -94,7 +94,7 @@ def test_nested_http_429_and_cancellation_in_a_group(monkeypatch):
 
 def test_search_falls_back_to_langsearch_when_exa_fails_in_any_way(monkeypatch):
     import asyncio
-    from hub import retrieval
+    from hub.skills.research import retrieval
     async def exa(query): raise ExceptionGroup('g', [ValueError('mcp client broke')])
     async def langsearch_results(query): return [{'title': 'T', 'url': 'https://a.example/', 'snippet': 's', 'text': None}]
     monkeypatch.setattr(retrieval, 'exa', exa); monkeypatch.setattr(retrieval, 'langsearch_results', langsearch_results)
@@ -103,7 +103,7 @@ def test_search_falls_back_to_langsearch_when_exa_fails_in_any_way(monkeypatch):
     assert provider == 'langsearch' and results and failures and failures[0].startswith('exa:') and rows[0]['fallback_reason'].startswith('exa:')
 
 def test_provider_order_puts_the_keyed_provider_before_keyless_exa_when_searxng_is_down():
-    from hub import retrieval
+    from hub.skills.research import retrieval
     assert retrieval.provider_order({'search_provider': 'searxng'}) == ['searxng', 'langsearch', 'exa']
     assert retrieval.provider_order({'search_provider': 'exa'}) == ['exa', 'langsearch']
     assert retrieval.provider_order({'search_provider': 'langsearch'}) == ['langsearch', 'exa']

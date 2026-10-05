@@ -53,7 +53,7 @@ def test_provider_schema_adaptation_and_closed_unknowns():
 
 
 def test_review_guards_final_format_and_exact_evidence():
-    from hub.answer_review import validate_assessment
+    from hub.skills.research.answer_review import validate_assessment
     value=AnswerReview.model_validate(assessment())
     guarded=validate_assessment(value,'Answer in exactly two bullets',{})
     assert guarded.status=='PARTIAL' and any(r.status=='unmet' for r in guarded.requirements)

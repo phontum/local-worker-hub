@@ -2,7 +2,9 @@ import json
 
 import pytest
 
-from hub import calls, contextpack, localize, pipelines
+from hub import calls, pipelines
+from hub.skills.coding.editing import contextpack
+from hub.skills.coding.intelligence import localize
 from hub.models import JobRequest
 from hub.report import final_report
 

@@ -1,6 +1,6 @@
 import json
 import pytest
-from hub import preferences
+from hub.skills.personal import preferences
 
 METRIC={'units':'metric','clock':'24h','timezone':'Europe/Belgrade'}
 

@@ -1,9 +1,9 @@
 import time
 import uuid
 
-from hub.codeindex import CodeIndex
+from hub.skills.coding.intelligence.codeindex import CodeIndex
 from hub.models import JobRequest
-from hub.repostate import RepoStates
+from hub.skills.coding.intelligence.repostate import RepoStates
 from hub.scoped import ScopedFiles
 
 def files_for(root):

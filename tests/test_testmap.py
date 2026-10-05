@@ -3,8 +3,9 @@ import uuid
 
 import pytest
 
-from hub import testmap
-from hub.codeindex import CodeIndex
+from hub.skills.coding.intelligence import testmap
+from hub.skills.coding.intelligence.codeindex import CodeIndex
+from hub.skills.coding.validation import templates
 from hub.models import JobRequest
 from hub.scoped import ScopedFiles
 
@@ -41,22 +42,22 @@ def test_history_boosts_a_test_that_failed_after_earlier_changes(index):
     ranked = {r['path']: r for r in testmap.select(index, ['pkg/other.py'], history)}
     assert 'failed 1x' in ' '.join(ranked['tests/test_api.py']['reasons']) and 'tests/test_billing.py' not in ranked
 
-TEMPLATE = {'name': 'pytest', 'argv': [sys.executable, '-m', 'pytest', '-q', testmap.PLACEHOLDER], 'cwd': '.', 'timeout': 300}
+TEMPLATE = {'name': 'pytest', 'argv': [sys.executable, '-m', 'pytest', '-q', templates.PLACEHOLDER], 'cwd': '.', 'timeout': 300}
 
 def test_the_template_is_filled_only_with_validated_test_paths(index):
-    filled = testmap.fill_template(TEMPLATE, ['tests/test_api.py', 'tests/test_billing.py'], index)
-    assert filled['argv'][-2:] == ['tests/test_api.py', 'tests/test_billing.py'] and filled['name'] == 'pytest (selected)' and testmap.PLACEHOLDER not in filled['argv']
+    filled = templates.fill_template(TEMPLATE, ['tests/test_api.py', 'tests/test_billing.py'], index)
+    assert filled['argv'][-2:] == ['tests/test_api.py', 'tests/test_billing.py'] and filled['name'] == 'pytest (selected)' and templates.PLACEHOLDER not in filled['argv']
     hostile = ['--rootdir=/etc', 'tests/test_api.py; rm -rf /', '../escape_test.py', 'pkg/billing.py', 'tests/missing_test.py', '$(id)']
-    assert testmap.fill_template(TEMPLATE, hostile, index) is None
-    assert testmap.fill_template(TEMPLATE, ['--rootdir=/etc', 'tests/test_api.py'], index)['argv'][-1] == 'tests/test_api.py'
-    assert testmap.fill_template({'name': 'plain', 'argv': ['pytest']}, ['tests/test_api.py'], index) is None
-    assert testmap.fill_template({'name': 'two', 'argv': ['pytest', testmap.PLACEHOLDER, testmap.PLACEHOLDER]}, ['tests/test_api.py'], index) is None
+    assert templates.fill_template(TEMPLATE, hostile, index) is None
+    assert templates.fill_template(TEMPLATE, ['--rootdir=/etc', 'tests/test_api.py'], index)['argv'][-1] == 'tests/test_api.py'
+    assert templates.fill_template({'name': 'plain', 'argv': ['pytest']}, ['tests/test_api.py'], index) is None
+    assert templates.fill_template({'name': 'two', 'argv': ['pytest', templates.PLACEHOLDER, templates.PLACEHOLDER]}, ['tests/test_api.py'], index) is None
 
 def test_an_unfilled_template_is_recognised_so_it_can_never_run():
-    assert testmap.refuse_unfilled(['pytest', testmap.PLACEHOLDER]) and testmap.refuse_unfilled(['x{tests}y']) and not testmap.refuse_unfilled(['pytest', 'tests/a.py'])
+    assert templates.refuse_unfilled(['pytest', templates.PLACEHOLDER]) and templates.refuse_unfilled(['x{tests}y']) and not templates.refuse_unfilled(['pytest', 'tests/a.py'])
 
 def test_recommend_returns_ranked_tests_and_concrete_approved_checks(index):
-    out = testmap.recommend(index, ['pkg/billing.py'], [TEMPLATE, {'name': 'lint', 'argv': ['ruff', 'check']}])
+    out = templates.recommend(index, ['pkg/billing.py'], [TEMPLATE, {'name': 'lint', 'argv': ['ruff', 'check']}])
     assert [c['name'] for c in out['checks']] == ['pytest (selected)'] and out['tests'][0]['path'].startswith('tests/')
 
 # Service and MCP wiring ----------------------------------------------------------------------------------------------
@@ -83,8 +84,8 @@ def test_service_recommends_tests_and_routes(store, tmp_path):
 
 def test_unfilled_templates_never_reach_a_check_runner(tmp_path):
     from hub.models import Check
-    from hub.validation import run_check_sync
-    result = run_check_sync(Check(name='t', argv=['pytest', testmap.PLACEHOLDER]), tmp_path)
+    from hub.skills.coding.validation.validation import run_check_sync
+    result = run_check_sync(Check(name='t', argv=['pytest', templates.PLACEHOLDER]), tmp_path)
     assert result['status'] == 'blocked' and 'fill it with recommend_checks' in result['reason']
 
 def test_the_mcp_tools_exist_and_are_read_only():
@@ -94,9 +95,9 @@ def test_the_mcp_tools_exist_and_are_read_only():
     assert tools['recommend_checks'].annotations.readOnlyHint and tools['estimate_delegation'].annotations.readOnlyHint
 
 def test_a_profile_group_holding_a_template_cannot_be_selected_directly(repo, monkeypatch):
-    from hub import profiles
+    from hub.skills.coding.validation import profiles
     from hub.models import Check
-    profile = profiles.ProjectProfile(repo=str(repo), constraints='c', groups={'plain': [Check(name='ok', argv=['true'])], 'selected': [Check(name='sel', argv=['pytest', testmap.PLACEHOLDER])]})
+    profile = profiles.ProjectProfile(repo=str(repo), constraints='c', groups={'plain': [Check(name='ok', argv=['true'])], 'selected': [Check(name='sel', argv=['pytest', templates.PLACEHOLDER])]})
     monkeypatch.setattr(profiles, 'load_profile', lambda r: (profile, 'a' * 64))
     ok = JobRequest(role='validator', repo=str(repo), task='x', profile_ref='a' * 12, check_groups=['plain'], idempotency_key='p1')
     assert [c.name for c in profiles.expand_profile(ok).checks] == ['ok']

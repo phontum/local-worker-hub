@@ -3,8 +3,8 @@ import sys
 import pytest
 from fastapi.testclient import TestClient
 
-from hub import workspace
-from hub.acceptance import build, diff_stats, review_focus
+from hub.skills.coding.editing import workspace
+from hub.skills.coding.validation.acceptance import build, diff_stats, review_focus
 from hub.models import Check, JobRequest
 from hub.runner import Runner
 from hub.service import create_app

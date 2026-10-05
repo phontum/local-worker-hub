@@ -4,7 +4,7 @@ import sys
 import pytest
 from fastapi.testclient import TestClient
 
-from hub import incident
+from hub.skills.coding.delegation import incident
 from hub.mcp_adapter import create_server
 from hub.models import Check, JobRequest, Review
 from hub.runner import Runner

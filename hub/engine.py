@@ -11,10 +11,10 @@ import re
 import signal
 import httpx
 from .models import JobRequest, AnswerReview, WebClaim
-from .web_verification import current_question, guard_current_answer, clarification
-from .preferences import prompt_lines, local_now
-from .plain import PLAIN_RULES, plain_report
-from .public_page import evidence_metadata
+from .skills.research.web_verification import current_question, guard_current_answer, clarification
+from .skills.personal.preferences import prompt_lines, local_now
+from .skills.personal.plain import PLAIN_RULES, plain_report
+from .skills.research.public_page import evidence_metadata
 from .runner import BASE_SYSTEM, ROLE_SYSTEM
 from .report import CONTRACT, parse_report
 from .scoped import create_tools
@@ -57,7 +57,7 @@ async def run(directory,label,prompt,report_only=False,phase='work'):
     # the optional answer review and --agent-loop.
     if not report_only and not request.agent_loop:
         if request.role in ('personal','researcher') and phase=='work' and not request.verify:
-            from .ask import run_ask
+            from .skills.research.ask import run_ask
             return await run_ask(directory,label,prompt,phase)
         if (request.role=='investigator' and phase=='work') or phase=='investigate':
             from .pipelines import run_investigate
@@ -212,7 +212,7 @@ async def run(directory,label,prompt,report_only=False,phase='work'):
                     message['content']='Review format incomplete; a requirements assessment is required.'
                 if assessment:
                     assessment_ready=True
-                    from .answer_review import validate_assessment
+                    from .skills.research.answer_review import validate_assessment
                     assessment=validate_assessment(assessment,request.task,review_evidence)
                     if current_web and not clarification(assessment.model_dump(),review_evidence):
                         guarded,valid,issues=guard_current_answer(assessment.model_dump(),assessment.web_claims,review_evidence,request.task,reviewed=True)
@@ -308,7 +308,7 @@ def main():
         loop.add_signal_handler(signal.SIGTERM,task.cancel)
         try:
             if a.structured:
-                from .structured import run_structured
+                from .skills.research.structured import run_structured
                 await run_structured(Path(a.job_dir),a.label,a.prompt,a.phase)
             else:await run(Path(a.job_dir),a.label,a.prompt,a.report_only,a.phase)
         finally:loop.remove_signal_handler(signal.SIGTERM)

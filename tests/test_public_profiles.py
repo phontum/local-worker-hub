@@ -1,7 +1,7 @@
 import json
 import stat
 
-from hub import profiles
+from hub.skills.coding.validation import profiles
 
 
 def test_profile_seed_initializes_empty_private_directory(tmp_path, monkeypatch):

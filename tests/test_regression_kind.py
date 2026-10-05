@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from hub import workspace
+from hub.skills.coding.editing import workspace
 from hub.models import Check, JobRequest
 from hub.report import parse_report
 from hub.runner import Runner
@@ -97,6 +97,6 @@ async def test_an_existing_test_edited_to_fail_is_not_a_reproduction(store, proj
 
 
 def test_added_tests_are_read_from_pytest_and_js_diffs():
-    from hub.acceptance import added_tests
+    from hub.skills.coding.validation.acceptance import added_tests
     patch = "+def test_total_is_exact():\n+    pass\n+  it('shows the label', () => {\n+  test.only('only this', () => {})\n-def test_removed():\n"
     assert added_tests(patch) == {'test_total_is_exact', 'shows the label', 'only this'}

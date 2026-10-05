@@ -644,3 +644,9 @@ virtualenv with `--stdio`), Python only, one repository, 3 repeats. Providers: `
 - The gold for the first 7 cases was partly corrected after seeing the lexical run; only the `apply` case is independent of the providers.
 - **Promotion rule outcome:** LSP stays a Tier-0 tool provider (approved per project through the profile `lsp` field). It is NOT used inside the pipelines: `eval_junior` retrieval uses the CodeIndex, the warm server lives in the service
   (not in the per-job engine process), and there is no downstream measurement showing it would help. TypeScript, Go and Rust servers were not tried.
+
+### Guards after the skills/ layout move — 2026-10-05
+
+Every skill module moved under `hub/skills/` and all imports were rewritten; the engine subprocess and service ran from the new paths (service restarted). `eval_junior` (22 cases x3, Gemma 4 12B, 16K): 61/66 correct (92.4%; 89.4% before),
+3 COMPLETE-but-wrong, median 6.1 s, 0 invalid model rows; check_requirement 8/9 (was 6/9), the other shapes unchanged. `eval_incidents` (3 repeats): 12/12, 0 false-COMPLETE, 0 destructive escapes, 0 partial applications, 0 silent truncations.
+The move changes no behaviour, so the +3 points on check_requirement is run-to-run variation, not an improvement. Caveat: the incident benchmark ran while a second, abandoned `eval_junior` was also queued on the hub (my double launch), which slowed both; correctness is not affected by queueing.

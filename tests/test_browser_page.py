@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 pytest.importorskip('playwright')
-from hub import browser_page
+from hub.skills.research import browser_page
 
 SPA = ('<!doctype html><html><head><title>Shop</title></head><body><div id="app"></div><noscript>Please enable JavaScript to view this shop.</noscript>'
        '<script src="/app.js"></script></body></html>')

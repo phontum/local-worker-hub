@@ -7,13 +7,14 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from hub import client, profiles
+from hub import client
+from hub.skills.coding.validation import profiles
 from hub.models import Check, JobRequest
 from hub.runner import Runner
 from hub.settings import STATE, initialize
 from hub.service import create_app
 from hub.presentation import result_summary, progress_summary, size
-from hub.validation import test_counts as parse_counts, direct_report
+from hub.skills.coding.validation.validation import test_counts as parse_counts, direct_report
 
 
 def request(repo, checks, **kw):

@@ -5,9 +5,10 @@ import uuid
 import pytest
 from pydantic import ValidationError
 
-from hub import mappings, spec as specmod
+from hub.skills.coding.editing import mappings
+from hub.skills.coding.delegation import spec as specmod
 from hub.models import JobRequest
-from hub.spec import Change, Criterion, DelegationSpec, Mapping, Scope, Target, compile_spec, draft_from_task, task_text, verify
+from hub.skills.coding.delegation.spec import Change, Criterion, DelegationSpec, Mapping, Scope, Target, compile_spec, draft_from_task, task_text, verify
 
 SPEC = {
     'goal': 'Rename the progress labels and keep the public API',

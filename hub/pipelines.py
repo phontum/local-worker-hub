@@ -7,15 +7,16 @@ import time
 from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 from .calls import Caller, load_profiles, write_session
-from .codeindex import CodeIndex, format_candidates, mentioned_text, select_ranges
-from . import contextpack, editgate, execctx, mappings
+from .skills.coding.intelligence.codeindex import CodeIndex, format_candidates, mentioned_text, select_ranges
+from .skills.coding.editing import contextpack, editgate, mappings
+from .skills.coding.execution import execctx
 from .phases import resolve_phase
-from .localize import identifiers, read_ranges, repo_map, search_hits
+from .skills.coding.intelligence.localize import identifiers, read_ranges, repo_map, search_hits
 from .models import JobRequest
-from .preferences import prompt_lines
+from .skills.personal.preferences import prompt_lines
 from .report import parse_report
 from .scoped import ScopedFiles, ScopeError
-from . import textedit
+from .skills.coding.editing import textedit
 
 PROFILES = {'localize': {'thinking': False, 'output': 600, 'temperature': 0.0},
             'investigate-answer': {'thinking': False, 'output': 2048, 'temperature': 0.2}}

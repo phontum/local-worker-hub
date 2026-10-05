@@ -25,7 +25,7 @@ def setup_searxng(port, assume_yes):
     if not assume_yes and (not sys.stdin.isatty() or input('Start the local SearXNG container now? [y/N] ').strip().lower()!='y'):
         raise SystemExit('Not started. Run the command above yourself, then: local-worker web configure searxng')
     subprocess.run(command,check=True,env={**os.environ,'SEARXNG_PORT':str(port)})
-    from .web_provider import searxng_health
+    from .skills.research.web_provider import searxng_health
     for _ in range(30):
         if searxng_health(f'http://127.0.0.1:{port}'):return
         time.sleep(2)
@@ -54,7 +54,7 @@ def main():
     if command=='web':
         p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('action',choices=['status','configure','setup-searxng'])
         p.add_argument('provider',choices=['exa','langsearch','searxng'],nargs='?');p.add_argument('--port',type=int,default=8888);p.add_argument('--yes',action='store_true');args=p.parse_args()
-        from .web_provider import selection, configure, langsearch_key
+        from .skills.research.web_provider import selection, configure, langsearch_key
         from .settings import CONFIG
         try:
             if args.action=='setup-searxng':
@@ -75,7 +75,7 @@ def main():
             value['known_url_extraction']='direct public origin first; explicitly unverified hosted fallback; cached mode reuses LangSearch text'
             value['langsearch_key_configured']=(CONFIG/'langsearch-api-key').is_file()
             if value['search_provider']=='searxng':
-                from .web_provider import searxng_health
+                from .skills.research.web_provider import searxng_health
                 value['searxng_healthy']=searxng_health(value.get('searxng_url','http://127.0.0.1:8888'))
             value['search_fallback']='Exa transient failure -> configured free LangSearch; reported in search evidence; per-job cooldown across passes'
             print(json.dumps(value,indent=2))
@@ -88,7 +88,7 @@ def main():
         p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('action',choices=['show','seed']);p.add_argument('--repo',default=str(Path.cwd()))
         args=p.parse_args()
         if args.action=='seed':
-            from .profiles import seed_profiles
+            from .skills.coding.validation.profiles import seed_profiles
             value=seed_profiles()
         else:value=call('GET','/api/project-profile?'+urlencode({'repo':args.repo}))
         print(json.dumps(value,indent=2));return
@@ -97,10 +97,10 @@ def main():
         p.add_argument('command');p.add_argument('action',choices=['check','submit','draft']);p.add_argument('target');p.add_argument('--repo',default='.')
         p.add_argument('--allow-path',action='append',default=[]);p.add_argument('--read-path',action='append',default=[]);p.add_argument('--kind');p.add_argument('--idempotency-key')
         args=p.parse_args()
-        from .spec import DelegationSpec, compile_spec, draft_from_task
+        from .skills.coding.delegation.spec import DelegationSpec, compile_spec, draft_from_task
         repo=str(Path(args.repo).resolve())
         if args.action=='draft':
-            from .codeindex import CodeIndex
+            from .skills.coding.intelligence.codeindex import CodeIndex
             from .models import JobRequest
             from .scoped import ScopedFiles
             index=CodeIndex.load(ScopedFiles(JobRequest(role='investigator',repo=repo,task='draft',idempotency_key=__import__('uuid').uuid4().hex)))
@@ -115,7 +115,7 @@ def main():
         except Exception as e:print(str(e),file=sys.stderr);sys.exit(2)
         return
     if command=='intel':
-        from .intel.tools import TOOLS
+        from .skills.coding.intelligence.intel.tools import TOOLS
         p=argparse.ArgumentParser(description='Deterministic code intelligence (no model call): find_symbol, find_references, find_implementations, callers, callees, symbol_context, outline, diagnostics.')
         p.add_argument('command');p.add_argument('tool',choices=sorted(TOOLS));p.add_argument('target',nargs='?',help='symbol name, or file path for outline');p.add_argument('--repo',default='.');p.add_argument('--path',help='disambiguate by defining file (callees, symbol_context)');p.add_argument('--limit',type=int)
         args=p.parse_args()
@@ -141,7 +141,7 @@ def main():
         p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('job_id');p.add_argument('--out');p.add_argument('--fixture',metavar='DIR',help='Write a replayable regression fixture (PRIVATE SOURCE and raw model replies) to DIR instead of the metadata-only export');p.add_argument('--include-notes',action='store_true',help='Include the review notes (written by you; check them for private text first)')
         args=p.parse_args()
         from .mcp_adapter import job_path
-        from . import incident
+        from .skills.coding.delegation import incident
         from .settings import STATE
         job=call('GET',job_path(args.job_id))
         if args.fixture:
@@ -228,7 +228,7 @@ def main():
         from .model_registry import models, probe, residency
         result={'model':MODEL,'models':{alias:{**value,**probe(value['name'])} for alias,value in models().items()},'loaded':residency(),'context':16384,'project':str(PROJECT),'state':str(STATE),
             'opencode':shutil.which('opencode'),'ollama':shutil.which('ollama')}
-        from .browser_page import status as browser_status
+        from .skills.research.browser_page import status as browser_status
         result['browser']=browser_status()
         try:result['opencode_version']=subprocess.check_output(['opencode','--version'],text=True,timeout=10).strip()
         except Exception as e:result['opencode_error']=str(e)

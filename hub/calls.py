@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import httpx
 from .phases import resolve_phase, model_support
 from .settings import CONFIG
-from .structured import call
+from .skills.research.structured import call
 
 def load_profiles(directory, defaults):
     path = directory / 'role-config.json'

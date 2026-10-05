@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from hub import mappings
+from hub.skills.coding.editing import mappings
 from hub.models import JobRequest
 from hub.report import parse_report
 from hub.runner import Runner

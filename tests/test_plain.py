@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 from hub import engine
 from hub.models import JobRequest, default_timeout
-from hub.plain import plain_report
+from hub.skills.personal.plain import plain_report
 from hub.report import final_report, parse_report
 
 def job(tmp_path,task='Weather in Novi Sad today?',profile=None,**kw):

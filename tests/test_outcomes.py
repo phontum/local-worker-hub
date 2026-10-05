@@ -4,7 +4,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from hub import outcomes, workspace
+from hub.skills.coding.delegation import outcomes
+from hub.skills.coding.editing import workspace
 from hub.models import JobRequest, Review
 from hub.service import create_app
 from hub.settings import initialize

@@ -3,11 +3,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from hub import engine,web_provider
-from hub.models import JobRequest,WebRequirement
-from hub.scoped import Research,ScopeError
+from hub import engine
+from hub.skills.research import web_provider
+from hub.models import JobRequest, WebRequirement
+from hub.scoped import Research, ScopeError
 from hub.report import final_report
-from hub.web_verification import guard_current_answer
+from hub.skills.research.web_verification import guard_current_answer
 from test_current_web import evidence
 
 
@@ -89,7 +90,7 @@ async def test_model_plan_decides_freshness_and_tools_unlock_without_domain_keyw
     request=JobRequest(role='personal',task=task,idempotency_key='plan',verify=True)
     (directory/'request.json').write_text(request.model_dump_json())
     monkeypatch.setattr('hub.scoped.public_url',AsyncMock(side_effect=lambda u:u))
-    from hub import public_page
+    from hub.skills.research import public_page
     body='Official change: Feature X was introduced in version 2.'
     metadata=json.loads(evidence().splitlines()[0].removeprefix('WEB_EVIDENCE '))
     metadata['requested_url']='https://docs.example/change'
@@ -146,7 +147,7 @@ async def test_reviewer_cannot_skip_its_plan_and_bypass_current_evidence_guard(t
 
 
 def test_source_name_and_punctuation_spacing_repairs_require_exact_observed_url_and_content():
-    from hub.web_verification import verified_claims
+    from hub.skills.research.web_verification import verified_claims
     body='Exact model\n116.499,00\nRSD\nIsporuka (A)\n: 499rsd\nNa zalihama'
     claim={'url':'https://shop.example/card','source':'shop.example','quote':'Exact model\n116.499,00 RSD\nIsporuka (A): 499rsd\nNa zalihama'}
     valid,issues=verified_claims([claim],{'R2':evidence(body)})

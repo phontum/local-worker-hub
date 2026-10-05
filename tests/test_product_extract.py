@@ -1,6 +1,6 @@
 from decimal import Decimal
 import pytest
-from hub.product_extract import extract_products, format_products, parse_price
+from hub.skills.research.product_extract import extract_products, format_products, parse_price
 
 def ld(body):
     return f'<html><head><script type="application/ld+json">{body}</script></head><body><h1>Shop</h1></body></html>'

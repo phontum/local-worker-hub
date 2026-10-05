@@ -178,7 +178,7 @@ def create_server():
     @server.tool(annotations=WRITE)
     def delegate(repo: str, spec: dict, idempotency_key: str | None=None) -> dict:
         """Submit a structured DelegationSpec: goal, kind, targets [{path, symbol?, lines?}], changes [{description, mappings: [{old, new}]}], invariants and acceptance (criteria: {kind: file_unchanged|symbol_exists|symbol_absent|no_new_files|check_passes|text, ...}; the mechanical kinds are verified by the host after the edit and unmet ones make a COMPLETE job PARTIAL, text ones are listed for you), evidence {job_ids, refs}, scope {read, edit, delete}, checks (approved argv), preset. Editing specs need scope.edit; fix_test and regression_test need a check. It runs the same Investigator/Editor/Validator pipelines as the other tools, so read results and apply_result as usual. The result's request_spec echoes what was understood."""
-        from .spec import DelegationSpec, compile_spec
+        from .skills.coding.delegation.spec import DelegationSpec, compile_spec
         compiled=compile_spec(DelegationSpec.model_validate(spec),repo,'mcp',idempotency_key)
         out=submit_request(compiled,NEXT_EDITOR if compiled.role=='editor' else NEXT_READ)
         return out|{'task_text':compiled.task[:1500]}

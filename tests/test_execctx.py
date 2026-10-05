@@ -3,8 +3,10 @@ import uuid
 
 import pytest
 
-from hub import calls, contextpack, execctx, pipelines, testparse
-from hub.codeindex import CodeIndex
+from hub import calls, pipelines
+from hub.skills.coding.editing import contextpack
+from hub.skills.coding.execution import execctx, testparse
+from hub.skills.coding.intelligence.codeindex import CodeIndex
 from hub.models import JobRequest
 from hub.scoped import ScopedFiles
 

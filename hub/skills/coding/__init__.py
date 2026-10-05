@@ -1,0 +1,1 @@
+"""Repository work: intelligence (finding things), execution (running and reading tests), validation (approved checks), editing (the edit protocol and workspace) and delegation (specs, routing, outcomes). Never imports skills.research."""

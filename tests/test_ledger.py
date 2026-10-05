@@ -1,9 +1,9 @@
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 import pytest
-from hub.ledger import WebLedger, NAME
+from hub.skills.research.ledger import WebLedger, NAME
 from hub.models import JobRequest
-from hub.public_page import evidence_metadata
+from hub.skills.research.public_page import evidence_metadata
 from hub.scoped import Research, ScopeError, create_tools
 
 def phase(ledger):

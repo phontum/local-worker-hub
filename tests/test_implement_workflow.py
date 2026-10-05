@@ -88,7 +88,7 @@ async def test_bounded_workflow_repairs_and_rechecks(repo,store,repairs,expected
     assert len(result['attempts'])==expected_attempts
     assert result['checks'][0]['exit_code']==0
     assert (repo/'app.ts').read_text()=='export const answer = 41;\n' and result['workspace']['origin_unchanged']  # the user's tree waits for apply_result
-    from hub import workspace
+    from hub.skills.coding.editing import workspace
     assert workspace.apply(job['id'])['applied']==['app.ts'] and (repo/'app.ts').read_text()=='export const answer = 42;\n'
     # Checks decide: no review or model diagnosis runs unless requested.
     assert all(kind not in ('diagnose','review') for _,kind in calls)
@@ -156,7 +156,7 @@ async def test_private_workspace_yields_patch_acceptance_packet_and_untouched_or
 
 @pytest.mark.asyncio
 async def test_apply_is_refused_when_the_user_edited_the_file_during_the_job(repo,store):
-    from hub import workspace
+    from hub.skills.coding.editing import workspace
     job=store.submit(implement_request(repo,key='conflict'));runner=Runner(store,'token');runner.execute_model=scripted(repo,[])
     await runner.run(store.next())
     (repo/'app.ts').write_text('export const answer = 99; // user edit\n')

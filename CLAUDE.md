@@ -21,25 +21,32 @@ Inspect user changes before editing. Preserve unrelated changes; never reset,
 clean or roll back a user's tree. Do not overlap edits with a worker's authorized
 files. After two unsuccessful local attempts, take over.
 
+## Layout
+
+Core (`hub/*.py`) runs jobs: queue, runner, service, CLI, MCP adapter, models, scoped tools, report, store, engine and the host pipelines. Capabilities live in `hub/skills/`:
+`coding/` (areas, low to high: `execution`, `intelligence`, `validation`, `editing`, `delegation`), `research/` and `personal/`. Coding and research never import each other, skills never import
+the job machinery, and coding areas import only downward; `tests/test_import_boundaries.py` enforces this from the directory layout, so put new modules in a skill area. The old top-level names
+(`hub.workspace`, `hub.codeindex`, ...) still import as aliases of the same module objects (`hub/__init__.py`); new code uses the canonical path.
+
 ## Files to know
 
 - `hub/cli.py`, `hub/mcp_adapter.py`: user and frontier interfaces.
 - `hub/service.py`, `hub/store.py`: authenticated localhost API, queue and history.
 - `hub/runner.py`, `hub/engine.py`: role workflows and bounded model execution.
-- `hub/codeindex.py`, `hub/workspace.py`, `hub/acceptance.py`, `hub/testparse.py`: deterministic code index and candidate ranking,
+- `hub/skills/coding/intelligence/codeindex.py`, `hub/skills/coding/editing/workspace.py`, `hub/skills/coding/validation/acceptance.py`, `hub/skills/coding/execution/testparse.py`: deterministic code index and candidate ranking,
   private editor workspace with guarded apply, the acceptance packet, and parsing of test/lint output into failures.
-- `hub/textedit.py`, `hub/contextpack.py`, `hub/editgate.py`, `hub/mappings.py`, `hub/incident.py`: strict transactional edit protocol (continuation after a cut-off reply, line-anchored
+- `hub/skills/coding/editing/textedit.py`, `hub/skills/coding/editing/contextpack.py`, `hub/skills/coding/editing/editgate.py`, `hub/skills/coding/editing/mappings.py`, `hub/skills/coding/delegation/incident.py`: strict transactional edit protocol (continuation after a cut-off reply, line-anchored
   matching), context packing for the edit prompt, the advisory complexity gate with proposed split, post-edit `old -> new` verification, and metadata-only incident export.
-- `hub/intel/`, `hub/spec.py`, `hub/execctx.py`, `hub/outcomes.py`: Tier-0 code tools behind a provider interface (CodeIndex today), the DelegationSpec and its host-verified criteria,
-  failure-frame context for `fix_test`, and delegation outcome rows, final frontier diffs and acceptance statistics. `hub/testmap.py` selects relevant tests and fills approved `{tests}` templates;
-  `hub/router.py` gives advisory Tier 0/1/2 routing. `tests/test_import_boundaries.py` classifies every module into a layer: add new modules there.
+- `hub/skills/coding/intelligence/intel/`, `hub/skills/coding/delegation/spec.py`, `hub/skills/coding/execution/execctx.py`, `hub/skills/coding/delegation/outcomes.py`: Tier-0 code tools behind a provider interface (CodeIndex today), the DelegationSpec and its host-verified criteria,
+  failure-frame context for `fix_test`, and delegation outcome rows, final frontier diffs and acceptance statistics. `hub/skills/coding/intelligence/testmap.py` selects relevant tests and `hub/skills/coding/validation/templates.py` fills approved `{tests}` templates;
+  `hub/skills/coding/delegation/router.py` gives advisory Tier 0/1/2 routing. `tests/test_import_boundaries.py` classifies every module into a layer: add new modules there.
 - `hub/scoped.py`, `hub/evidence.py`: scoped tools and freshness/provenance checks.
-- `hub/public_page.py`, `hub/web_provider.py`, `hub/web_verification.py`: public
+- `hub/skills/research/public_page.py`, `hub/skills/research/web_provider.py`, `hub/skills/research/web_verification.py`: public
   retrieval, search-provider adapters and current-source verification.
-- `hub/providers/`: structured data providers (weather, fx, clock) the ask decision can choose;
-  `hub/product_extract.py`: JSON-LD/microdata/meta product parsing; `hub/web_fixtures.py`: eval record/replay.
-- `hub/answer_review.py`, `hub/report.py`: requirements review and report contract.
-- `hub/validation.py`, `hub/profiles.py`: approved argv checks and private profiles.
+- `hub/skills/research/providers/`: structured data providers (weather, fx, clock) the ask decision can choose;
+  `hub/skills/research/product_extract.py`: JSON-LD/microdata/meta product parsing; `hub/skills/research/web_fixtures.py`: eval record/replay.
+- `hub/skills/research/answer_review.py`, `hub/report.py`: requirements review and report contract.
+- `hub/skills/coding/validation/validation.py`, `hub/skills/coding/validation/profiles.py`: approved argv checks and private profiles.
 - `hub/install.py`, `hub/settings.py`: installation and private locations.
 - `frontend/src/`: dashboard, traces and evidence presentation.
 
@@ -63,7 +70,7 @@ files. After two unsuccessful local attempts, take over.
   authorized paths and fresh observed source, and land in a private workspace; only `apply_result` writes the user's tree, and only if the
   authorized files are unchanged there. Preserve symlink, hardlink and secret-file guards.
 - Editor replies are applied transactionally: strict parse, zero edits from a truncated or malformed reply, all-or-nothing commit, a guard against destructive
-  replacements, and reports built from the actual diff. `in_place` is a human CLI option, never available over MCP. Keep these properties when changing `hub/textedit.py`,
+  replacements, and reports built from the actual diff. `in_place` is a human CLI option, never available over MCP. Keep these properties when changing `hub/skills/coding/editing/textedit.py`,
   `hub/pipelines.py` (`run_edit`) or the runner's report assembly; `tests/test_edit_incidents.py` replays the real failures.
 - Validator executes only explicitly approved argv checks. It uses zero model
   tokens by default. Approved programs are trusted execution, not an OS sandbox;

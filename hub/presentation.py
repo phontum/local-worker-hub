@@ -1,7 +1,7 @@
 """Bounded projections; full private evidence stays in the store/artifacts."""
 import json
 import time
-from .validation import failed, failure_lines
+from .skills.coding.validation.validation import failed, failure_lines
 from .report import parse_report
 
 
@@ -49,7 +49,7 @@ def live_workspace(job):
     recorded=(job.get('result') or {}).get('workspace')
     if not recorded:return None
     try:
-        from . import workspace
+        from .skills.coding.editing import workspace
         record=workspace.read_record(job['id']);state=record['state']
         extra={'stale_dependencies':workspace.stale_dependencies(job['id']),'removed':record.get('removed',[])}
     except Exception:state=recorded.get('state');extra={}

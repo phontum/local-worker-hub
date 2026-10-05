@@ -3,7 +3,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from hub.intel import tools
+from hub.skills.coding.intelligence.intel import tools
 from hub.service import create_app
 from hub.settings import initialize
 

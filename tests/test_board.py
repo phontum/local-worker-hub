@@ -3,9 +3,10 @@ import sys
 from unittest.mock import AsyncMock
 import httpx
 import pytest
-from hub import board_drift, cli, structured
-from hub.board_prompts import BOARD_PROFILES, FULL_ROLES
-from hub.ledger import NAME as LEDGER
+from hub.skills.research import board_drift, structured
+from hub import cli
+from hub.skills.research.board_prompts import BOARD_PROFILES, FULL_ROLES
+from hub.skills.research.ledger import NAME as LEDGER
 from hub.models import BoardProposal, BoardSynthesis, JobRequest
 from hub.report import parse_report
 from hub.runner import Runner
@@ -245,7 +246,7 @@ async def test_scout_runs_one_ledger_search_and_only_the_skeptic_sees_it(store,m
     assert '<discovery>' in prompts['proposal-skeptic'] and 'Shop A RTX 5070' in prompts['proposal-skeptic']
     assert prompts['proposal-skeptic'].count('</discovery>')==1 and '[/discovery]' in prompts['proposal-skeptic']
     assert prompts['proposal-challenger']==WRAPPED and 'discovery' not in prompts['arbiter']
-    from hub.ledger import WebLedger
+    from hub.skills.research.ledger import WebLedger
     assert WebLedger.open(directory).read()['used']=={'search':1,'fetch':0}  # not reset when the arbiter seeds the plan
     assert json.loads((directory/'board-scout.json').read_text())['ok'] and saved['result']['board']['scout']=={'query':'RTX 5070 price Novi Sad','ok':True}
 

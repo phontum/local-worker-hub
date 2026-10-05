@@ -6,11 +6,12 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from hub import engine,public_page
+from hub import engine
+from hub.skills.research import public_page
 from hub.models import JobRequest
 from hub.report import final_report
-from hub.scoped import Research,ScopeError
-from hub.web_verification import guard_current_answer,verified_claims,clarification
+from hub.scoped import Research, ScopeError
+from hub.skills.research.web_verification import guard_current_answer, verified_claims, clarification
 
 
 def evidence(body='116.499,00 RSD\nNa zalihama',**extras):
@@ -136,7 +137,7 @@ def test_composed_quotes_keep_only_exact_fragments_and_conditions():
 
 
 def test_dashboard_summary_keeps_verification_artifact_and_bounds_issues():
-    from hub.presentation import result_summary,size
+    from hub.presentation import result_summary, size
     value=result_summary({'id':'a'*32,'state':'completed','request':{'role':'personal'},'review':None,
         'result':{'web_verification':{'artifact':'work.web-verification.json','verified_observations':1,'issues':['x'*2000]*16}}})
     assert value['web_verification']['verified_observations']==1

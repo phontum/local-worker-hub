@@ -3,7 +3,10 @@ import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 import pytest
-from hub import answers, ask, calls, engine, localize, pipelines, retrieval, textedit
+from hub.skills.research import answers, ask, retrieval
+from hub import calls, engine, pipelines
+from hub.skills.coding.intelligence import localize
+from hub.skills.coding.editing import textedit
 from hub.models import JobRequest
 from hub.report import final_report, parse_report
 from hub.scoped import ScopedFiles, ScopeError

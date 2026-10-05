@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from hub import codeindex
-from hub.codeindex import CodeIndex, format_candidates, mentioned_text, select_ranges, stem, subwords
+from hub.skills.coding.intelligence import codeindex
+from hub.skills.coding.intelligence.codeindex import CodeIndex, format_candidates, mentioned_text, select_ranges, stem, subwords
 from hub.models import JobRequest
 from hub.scoped import ScopedFiles
 
@@ -127,7 +127,7 @@ def test_naming_helpers():
 
 def test_nested_functions_and_lazy_imports_are_indexed(tmp_path):
     import uuid
-    from hub.codeindex import CodeIndex
+    from hub.skills.coding.intelligence.codeindex import CodeIndex
     from hub.models import JobRequest
     from hub.scoped import ScopedFiles
     root = tmp_path / 'p'

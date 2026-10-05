@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from hub import browser_page, public_page, retrieval, scoped
+from hub.skills.research import browser_page, public_page, retrieval
+from hub import scoped
 
 NOW = datetime.now(timezone.utc).isoformat()
 LONG = 'Product description and specifications for the item. ' * 12

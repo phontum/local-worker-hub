@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from hub import calls, editgate, pipelines
+from hub import calls, pipelines
+from hub.skills.coding.editing import editgate
 from hub.models import Check, JobRequest
 from hub.report import final_report, parse_report
 from hub.runner import Runner

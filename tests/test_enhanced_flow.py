@@ -171,7 +171,7 @@ def test_native_stream_usage_once_and_upstream_closed(monkeypatch,store,outcome)
 
 
 def test_editor_profile_and_handoff_accounting(repo,store,tmp_path,monkeypatch):
-    from hub import profiles
+    from hub.skills.coding.validation import profiles
     from hub.models import Review
     config=tmp_path/'profiles';(config/'projects').mkdir(parents=True)
     (config/'projects'/'fixture.json').write_text(json.dumps({'repo':str(repo),'constraints':'Preserve unrelated changes','source_files':['app.ts'],

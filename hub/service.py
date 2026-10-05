@@ -18,12 +18,13 @@ from fastapi.staticfiles import StaticFiles
 from .models import JobRequest, Review
 from .settings import initialize, STATE, PROJECT
 from .model_registry import model_name, allowed_names, models as registered_models, probe, OLLAMA
-from . import workspace, outcomes
+from .skills.coding.editing import workspace
+from .skills.coding.delegation import outcomes
 from .scoped import ScopeError
 from .store import Store
 from .runner import Runner, stop_process
 from .presentation import result_summary, result_brief, progress_summary, history_item
-from .profiles import show_profile, expand_profile
+from .skills.coding.validation.profiles import show_profile, expand_profile, lsp_servers
 
 
 class ApplyOptions(BaseModel):
@@ -275,31 +276,33 @@ def create_app(store=None, start_workers=True):
     @app.post('/api/intel/{tool}',dependencies=[Depends(auth)])
     def intel(tool:str,body:dict):
         """Tier-0 code intelligence: deterministic, no model call, does not enter the job queue."""
-        from .intel import tools as intel_tools
-        try:return intel_tools.run(tool,str(body.get('repo') or ''),{k:v for k,v in body.items() if k!='repo'})
+        from .skills.coding.intelligence.intel import tools as intel_tools
+        repo=str(body.get('repo') or '')
+        try:return intel_tools.run(tool,repo,{k:v for k,v in body.items() if k!='repo'},lsp_servers(repo))
         except (ValueError,OSError) as e:raise HTTPException(409,str(e))
 
     @app.post('/api/testmap',dependencies=[Depends(auth)])
     def testmap_recommend(body:dict):
         """Likely tests for changed files and, when the project profile has a {tests} template check, the concrete approved check to run on them."""
-        from . import testmap
-        from .intel.tools import provider_for
-        from .profiles import load_profile
+        from .skills.coding.intelligence import testmap
+        from .skills.coding.validation import templates
+        from .skills.coding.intelligence.intel.tools import provider_for
+        from .skills.coding.validation.profiles import load_profile
         repo=str(body.get('repo') or '');changed=[str(p) for p in body.get('paths') or []][:50]
         if not changed:raise HTTPException(409,'paths is required')
-        try:index=provider_for(repo).index
+        try:index=provider_for(repo,lsp_servers(repo)).index
         except (ValueError,OSError) as e:raise HTTPException(409,str(e))
-        templates=[]
+        found=[]
         try:
             profile,_=load_profile(repo)
-            templates=[c.model_dump() for group in profile.groups.values() for c in group if testmap.PLACEHOLDER in c.argv]
+            found=[c.model_dump() for group in profile.groups.values() for c in group if templates.PLACEHOLDER in c.argv]
         except (ValueError,OSError):pass
-        return testmap.recommend(index,changed,templates,testmap.history_from_jobs(store.list(100000)),int(body.get('limit') or 8))
+        return templates.recommend(index,changed,found,testmap.history_from_jobs(store.list(100000)),int(body.get('limit') or 8))
 
     @app.post('/api/route',dependencies=[Depends(auth)])
     def route(body:dict):
         """Advisory tier for a task: Tier 0 (host tools), Tier 1 (local model) or Tier 2 (frontier keeps it), with the reasons and the evidence behind them."""
-        from . import router
+        from .skills.coding.delegation import router
         role=str(body.get('role') or 'editor')
         if role not in ('investigator','editor','validator'):raise HTTPException(409,'role must be investigator, editor or validator')
         return router.estimate(role,body.get('kind') or None,str(body.get('task') or ''),int(body.get('files') or 0),store.list(100000),bool(body.get('tier0_answerable')),
@@ -307,7 +310,7 @@ def create_app(store=None, start_workers=True):
 
     @app.get('/api/outcomes',dependencies=[Depends(auth)])
     def outcome_stats(include_eval:bool=False):
-        from . import router
+        from .skills.coding.delegation import router
         return {'by_kind':outcomes.stats(store.list(100000),include_eval),'calibration':router.calibration(store.list(100000))}
 
     @app.post('/api/jobs/{ident}/apply',dependencies=[Depends(auth)])

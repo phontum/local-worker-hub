@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from hub import calls, incident, pipelines
+from hub import calls, pipelines
+from hub.skills.coding.delegation import incident
 from hub.models import JobRequest
 from hub.report import final_report
 

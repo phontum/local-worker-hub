@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from hub import profiles
-from hub.intel import lsp, tools
-from hub.intel.lexical import LexicalProvider
-from hub.intel.lsp import LspClient, LspError, LspProvider, Pool, path_uri
+from hub.skills.coding.validation import profiles
+from hub.skills.coding.intelligence.intel import lsp, tools
+from hub.skills.coding.intelligence.intel.lexical import LexicalProvider
+from hub.skills.coding.intelligence.intel.lsp import LspClient, LspError, LspProvider, Pool, path_uri
 from hub.models import Check, JobRequest
 from hub.scoped import ScopedFiles
 
@@ -104,8 +104,8 @@ def test_the_pool_keeps_at_most_two_servers_and_stops_the_least_recently_used(tm
     p.close_all()
 
 def test_servers_start_only_when_the_reviewed_profile_names_them(root, monkeypatch):
-    assert tools.provider_for(str(root)).__class__ is LexicalProvider
+    assert tools.provider_for(str(root), profiles.lsp_servers(str(root))).__class__ is LexicalProvider
     profile = profiles.ProjectProfile(repo=str(root), constraints='c', groups={'g': [Check(name='ok', argv=['true'])]}, lsp={'python': ['pyright-langserver', '--stdio']})
     monkeypatch.setattr(profiles, 'load_profile', lambda r: (profile, 'a' * 64))
-    assert lsp.approved_servers(str(root)) == {'python': ['pyright-langserver', '--stdio']}
-    assert isinstance(tools.provider_for(str(root)), LspProvider)
+    assert profiles.lsp_servers(str(root)) == {'python': ['pyright-langserver', '--stdio']}
+    assert isinstance(tools.provider_for(str(root), profiles.lsp_servers(str(root))), LspProvider)

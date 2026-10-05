@@ -5,7 +5,8 @@ from decimal import Decimal
 
 import pytest
 
-from hub import ask, public_page, retrieval, scoped
+from hub.skills.research import ask, public_page, retrieval
+from hub import scoped
 from hub.report import final_report
 from test_pipelines_v3 import PREFS, ask_job, fake_models
 

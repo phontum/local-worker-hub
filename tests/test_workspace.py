@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from hub import workspace
+from hub.skills.coding.editing import workspace
 from hub.scoped import ScopeError
 
 GIT = ['git', '-c', 'user.name=t', '-c', 'user.email=t@t']

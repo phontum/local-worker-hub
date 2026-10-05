@@ -7,7 +7,8 @@ import uuid
 
 import pytest
 
-from hub import calls, pipelines, textedit
+from hub import calls, pipelines
+from hub.skills.coding.editing import textedit
 from hub.models import JobRequest
 from hub.report import final_report
 from hub.scoped import ScopedFiles

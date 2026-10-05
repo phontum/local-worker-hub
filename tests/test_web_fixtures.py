@@ -2,7 +2,7 @@ import asyncio
 import json
 import time
 import pytest
-from hub import web_fixtures
+from hub.skills.research import web_fixtures
 from hub.settings import STATE
 
 @pytest.fixture(autouse=True)
@@ -65,9 +65,9 @@ def test_expired_config_is_ignored_so_an_interrupted_run_cannot_leave_replay_on(
     assert web_fixtures.directory() == (None, None)  # no expiry at all is treated as expired
 
 def test_provider_record_replay_keys_on_arguments_and_units_and_skips_the_clock(monkeypatch, private_config):
-    from hub.providers.base import ProviderError, ProviderResult
-    from hub.providers.fx import Fx, FxArgs
-    from hub.providers.clock import Clock, ClockArgs
+    from hub.skills.research.providers.base import ProviderError, ProviderResult
+    from hub.skills.research.providers.fx import Fx, FxArgs
+    from hub.skills.research.providers.clock import Clock, ClockArgs
     root = STATE / 'benchmarks' / 'fixtures-providers'
     calls = []
     async def fetch(self, args, prefs, task=''):

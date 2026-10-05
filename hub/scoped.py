@@ -16,7 +16,7 @@ import fcntl
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.server.fastmcp import FastMCP
-from .models import JobRequest,WebRequirement,WebResearchPlan
+from .models import JobRequest, WebRequirement, WebResearchPlan
 
 EXCLUDED = {'.git','.aws','.ssh','.codex','.claude','.venv','node_modules','dist','.next',
             '__pycache__','.local-archive','backup','backups','coverage','.cache'}
@@ -294,7 +294,7 @@ class Research:
 
     def _charge(self,kind):
         if not self.ledger:return
-        from .ledger import BudgetExhausted
+        from .skills.research.ledger import BudgetExhausted
         try:self.ledger.charge(kind)
         except BudgetExhausted as error:raise ScopeError(str(error)) from None
 
@@ -327,7 +327,7 @@ class Research:
     @staticmethod
     def provider_error(error):
         """Map a raw Exa/MCP failure to ProviderUnavailable (try the next provider) or ScopeError; anything else comes back unchanged."""
-        from .web_provider import ProviderUnavailable
+        from .skills.research.web_provider import ProviderUnavailable
         import httpx
         if isinstance(error,TimeoutError):return ProviderUnavailable('Exa public tool timed out')
         if isinstance(error,httpx.TransportError):return ProviderUnavailable('Exa public transport unavailable')
@@ -362,7 +362,7 @@ class Research:
                     schema=available[name].inputSchema
                     args=self.provider_arguments(name,args,schema)
                     result=await session.call_tool(name,args)
-                    from .web_provider import check_exa_response,ProviderUnavailable
+                    from .skills.research.web_provider import check_exa_response, ProviderUnavailable
                     text='\n'.join(c.text for c in result.content if getattr(c,'type',None)=='text')[:24000]
                     check_exa_response(text)
                     if result.isError: raise ProviderUnavailable('Exa public tool returned an error')
@@ -380,7 +380,7 @@ class Research:
         self._charge('search')
         self.searches+=1
         from datetime import datetime, timezone
-        from .web_provider import check_exa_response,ProviderUnavailable,langsearch_key
+        from .skills.research.web_provider import check_exa_response, ProviderUnavailable, langsearch_key
         provider=self.provider;reason=None
         if provider=='exa':
             try:
@@ -399,7 +399,7 @@ class Research:
         prefix='SEARCH_EVIDENCE '+json.dumps({'selected_provider':self.provider,'provider':provider,'fallback_reason':reason})+'\n'
         if reason:prefix+='Exa unavailable; using configured free LangSearch fallback. Do not invent results if this search is unhelpful.\n'
         if provider=='langsearch':
-            from .web_provider import langsearch
+            from .skills.research.web_provider import langsearch
             retrieved=datetime.now(timezone.utc).isoformat()
             # LangSearch has no separate objective field. Keep the focused query
             # intact rather than diluting it with the model's research brief.
@@ -434,7 +434,7 @@ class Research:
             self.fetches+=1
             metadata={'method':'hosted-extraction','requested_url':url,'current_eligible':False,'origin_attempted':mode=='current'}
             if mode=='current':
-                from .public_page import fetch_origin
+                from .skills.research.public_page import fetch_origin
                 try:
                     text,metadata=await fetch_origin(url,public_url)
                     metadata['origin_attempted']=True
@@ -448,7 +448,7 @@ class Research:
                     self.audit('web_origin_unavailable',{'url':url,'reason':reason[:160]})
             if metadata['method']!='origin-http':
                 if url not in self.pages:
-                    from .web_provider import ProviderUnavailable
+                    from .skills.research.web_provider import ProviderUnavailable
                     try:
                         if self.exa_unavailable:raise ProviderUnavailable('Exa hosted extraction unavailable during cooldown')
                         hosted=await self.call('web_fetch_exa',{'url':url})
@@ -521,9 +521,9 @@ def create_tools(job_dir, phase=None, groups=None):
     if allow('edit') and request.role=='editor' and phase not in ('investigate','review','diagnose','answer_review'):
         for fn in (files.edit_file,files.replace_lines,files.write_file): server.add_tool(guarded(fn))
     if allow('web') and request.role in ('researcher','personal'):
-        from .web_provider import selection
+        from .skills.research.web_provider import selection
         plan_name='answer-review' if phase=='answer_review' else 'work'
-        from .ledger import WebLedger
+        from .skills.research.ledger import WebLedger
         ledger=WebLedger.open(directory)
         strict=request.verify or phase=='answer_review'
         provider=selection(directory)['search_provider']

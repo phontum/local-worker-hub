@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from hub import calls, pipelines, textedit, workspace
+from hub import calls, pipelines
+from hub.skills.coding.editing import textedit, workspace
 from hub.models import Check, JobRequest
 from hub.phases import resolve_phase
 from hub.report import final_report, parse_report

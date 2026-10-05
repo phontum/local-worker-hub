@@ -389,11 +389,11 @@ when they drove the procedure through tool calls; Ollama's tool-call layer for Q
 bugs. The default paths therefore use no tool calling. The host does the procedure; the model makes a small
 schema-constrained decision and then reads and writes text.
 
-**Ask (Personal and Researcher)**, `hub/ask.py`:
+**Ask (Personal and Researcher)**, `hub/skills/research/ask.py`:
 
 1. Decide (one JSON call): does this need the web, up to two search queries, the reply language, and optionally a
    structured provider with its arguments (see below). A follow-up chat message also sees up to six earlier turns.
-2. Search (`hub/retrieval.py`): the configured provider first, then the others, with every fallback reported and any provider failure
+2. Search (`hub/skills/research/retrieval.py`): the configured provider first, then the others, with every fallback reported and any provider failure
    isolated (a rate limit never ends the job). With SearXNG chosen the order is SearXNG, LangSearch, Exa; with Exa, Exa then LangSearch.
 3. Read the best three pages live through the DNS-pinned origin reader. Main text is extracted with trafilatura.
    A page that cannot be read falls back to a labelled third-party copy, or to its search snippet.
@@ -409,7 +409,7 @@ Typical time is 10-20 s. COMPLETE when the model answered; PARTIAL when the sour
 research loop with origin-proof quotes; `--review` adds the independent requirements review. `--agent-loop` uses
 the older model-driven tool loop, for comparison.
 
-**Structured providers**, `hub/providers/`: for questions with an exact public data source the decide call can pick a
+**Structured providers**, `hub/skills/research/providers/`: for questions with an exact public data source the decide call can pick a
 provider instead of a web search. `weather` (Open-Meteo: geocoding, current conditions and an hourly table for the day and
 hours asked about, in the preferred units; an ambiguous place name is flagged in the data so the answer states which
 place it used), `fx` (Frankfurter, European Central Bank reference rates; about 30 major currencies, no RSD; the host does
@@ -420,7 +420,7 @@ transport and carry only a place, currency codes or time zones. If a provider fa
 the pipeline falls back to web search and records why. `~/.config/local-worker/providers.json` with
 `{"disabled": ["fx"]}` turns providers off. The strict `--verify` loop does not use providers.
 
-**Pages that need JavaScript**, `hub/browser_page.py`: after the plain origin read, a page whose text is thin, whose HTML says to
+**Pages that need JavaScript**, `hub/skills/research/browser_page.py`: after the plain origin read, a page whose text is thin, whose HTML says to
 enable JavaScript, or whose app root is empty is rendered in a locked-down Chromium (Playwright; `local-worker doctor` shows
 whether it is installed). The browser never touches the network itself: every request it makes is re-issued by the same
 DNS-pinned public-only client (redirects are validated hop by hop), only GET/HEAD for documents, scripts, stylesheets and
@@ -432,7 +432,7 @@ not help with sites that refuse the client (403), so those are not retried in th
 `origin-browser` and `javascript_rendered: true`. `~/.config/local-worker/browser.json` with `{"mode": "off"}` disables it and
 `"always"` renders every page. The strict `--verify` loop does not use the browser: pages that need JavaScript stay unverified there.
 
-**Product data**, `hub/product_extract.py`: JSON-LD, schema.org microdata and `product:price` meta tags are parsed on the host
+**Product data**, `hub/skills/research/product_extract.py`: JSON-LD, schema.org microdata and `product:price` meta tags are parsed on the host
 (price as a decimal, ISO currency, availability, condition, seller, variant) and shown to the model as a host-written
 `PRODUCT DATA` excerpt before the page text; the text stays visible, so a "sold out" banner next to an InStock offer is reported
 as a conflict. Markup values are single-line and bounded before they reach the prompt.
@@ -447,7 +447,7 @@ Browser mutations require a same-origin request, so use the built dashboard, not
 
 **Replayable evaluation**: `benchmarks/eval_small.py --web record` stores search results, page text and provider
 responses under the private state directory, and `--web replay` serves them back without network, so only the model
-varies (`hub/web_fixtures.py`). The harness writes `~/.config/local-worker/web-fixtures.json` (with an expiry) for the
+varies (`hub/skills/research/web_fixtures.py`). The harness writes `~/.config/local-worker/web-fixtures.json` (with an expiry) for the
 run, because job processes start with a minimal environment, and restores it afterwards. Job processes load `hub/` code
 per job: do not edit it during a run. Code that runs inside the service (`runner.py`, `validation.py`, `presentation.py`) needs
 `systemctl --user restart local-worker-hub.service` to take effect.
@@ -459,9 +459,9 @@ secret and starts a container bound to 127.0.0.1:8888 (JSON on, limiter off). It
 provider. `local-worker web status` checks its health. Some engines (Brave, DuckDuckGo) often refuse self-hosted
 instances; Exa remains the fallback. The strict `--verify` loop keeps using Exa.
 
-**Investigator**, `hub/pipelines.py`, `hub/codeindex.py`, `hub/localize.py`:
+**Investigator**, `hub/pipelines.py`, `hub/skills/coding/intelligence/codeindex.py`, `hub/skills/coding/intelligence/localize.py`:
 
-- The host keeps a deterministic code index per repository (`hub/codeindex.py`, cached in the private state directory by file
+- The host keeps a deterministic code index per repository (`hub/skills/coding/intelligence/codeindex.py`, cached in the private state directory by file
   mtime and size): definitions with line spans, imports (resolved to repository files for Python and JavaScript/TypeScript) and
   an identifier word table. Python uses `ast`; JavaScript, TypeScript, Go and Rust use tree-sitter; everything is built through
   the scoped inventory, so secret files, symlinks and excluded directories never enter it.
@@ -477,7 +477,7 @@ instances; Exa remains the fallback. The strict `--verify` loop keeps using Exa.
   COMPLETE needs at least one verified reference and the model's own `complete` flag; otherwise PARTIAL.
 - If the index fails the older map and literal search still run.
 
-**Editor**, `hub/textedit.py`, `hub/workspace.py`, `hub/acceptance.py`, aider-style:
+**Editor**, `hub/skills/coding/editing/textedit.py`, `hub/skills/coding/editing/workspace.py`, `hub/skills/coding/validation/acceptance.py`, aider-style:
 
 - The host puts the authorized files in the prompt (regions around named identifiers for files over 400 lines).
 - The model replies with `FILE:` plus SEARCH/REPLACE blocks, or WHOLE blocks for small or new files.
@@ -497,7 +497,7 @@ instances; Exa remains the fallback. The strict `--verify` loop keeps using Exa.
 - **Reviews.** `record_review` needs notes (at least 10 characters) for `rejected` and `takeover`, and takes a `reason` (`truncated`, `wrong_edit`, `oversized`, `no_change`,
   `check_failed`, `scope`, `other`). `local-worker incident JOB [--out FILE]` exports a metadata-only record (file aliases, counts, finish reasons, error categories; no source or
   task text) that can become a regression case. `/api/summary` reports rejections and takeovers by kind and reason (`review_stats`).
-- **Context packing** (`hub/contextpack.py`): the model sees a file whole when it fits (context window minus the output cap, a margin and the rest of the prompt, at about 3.2 characters per token);
+- **Context packing** (`hub/skills/coding/editing/contextpack.py`): the model sees a file whole when it fits (context window minus the output cap, a margin and the rest of the prompt, at about 3.2 characters per token);
   a larger file is shown as its head, the lines holding every quoted string and the old side of every `old -> new` in the task, identifiers (protocol words such as `SEARCH` removed),
   definitions whose names match the task, then neighbouring lines until the budget is spent, with explicit `lines a-b not shown` markers. Files in `read_paths` that are not authorized are
   added as read-only references (whole, or signatures when large). `context.json` in the job directory and `acceptance.edits.context` report what was shown, which named texts were not found
@@ -506,7 +506,7 @@ instances; Exa remains the fallback. The strict `--verify` loop keeps using Exa.
   written), the cut-off block is dropped, and the model is shown the file with those edits applied and asked to continue with only what is missing; up to five continuation turns, each must add
   at least one block, and a complete block that does not match stops the job. Nothing reaches your tree until the single all-or-nothing commit at the end; `staged.diff` and the turn records are written as
   the job goes, so a job that is killed for time leaves them. This is what makes a task that repeats one change across many places (16 handlers wrapped in try/catch) finish instead of losing everything.
-- **Complexity gate** (`hub/editgate.py`): counts renames, mapped values, behavioural clauses and task length (14+ changes, 8+ behaviours or 1800+ characters trips it). By default it only **advises**: the
+- **Complexity gate** (`hub/skills/coding/editing/editgate.py`): counts renames, mapped values, behavioural clauses and task length (14+ changes, 8+ behaviours or 1800+ characters trips it). By default it only **advises**: the
   decision is saved as `gate.json` (mode `advised`) for calibration and the job runs. `refuse_oversized` refuses before any model call (BLOCKED, `next_action: split_and_resubmit`) with `proposed_split`,
   units grouped by file, at most six changes each, each with a ready-to-submit task; `skip_gate` / `--no-gate` ignores it. It is advisory because, with continuation, a flagged task that Gemma does in
   one shot (the 15-change experiment: 3/3 correct in about 20 s) was being refused for nothing.
@@ -541,7 +541,7 @@ instances; Exa remains the fallback. The strict `--verify` loop keeps using Exa.
   hashes taken at the snapshot). It never writes through a symlink or into secret files. Trees expire after seven days; the report
   and patch stay readable. `record_review` remains the acceptance log.
 
-**Test output**, `hub/testparse.py`: check output from pytest, vitest, node:test, tsc, ruff, mypy and eslint is parsed on the host into
+**Test output**, `hub/skills/coding/execution/testparse.py`: check output from pytest, vitest, node:test, tsc, ruff, mypy and eslint is parsed on the host into
 failures (test id, file, line, assertion text) and counts. A validator job without a model summary therefore reports which tests failed
 and where, at zero tokens; the repair turn of the implement workflow sees the parsed failures and a short raw tail instead of a long tail.
 Unknown formats stay raw. ruff, mypy and eslint parsing follows their documented formats and has not been run against recorded output here.
@@ -559,33 +559,33 @@ Deterministic replays of each documented failure live in `tests/test_edit_incide
 ## Tier-0 tools, delegation specs, outcomes and safer apply
 
 - **Tier 0 (no model call).** `find_symbol`, `find_references`, `find_implementations`, `callers`, `callees`, `diagnostics`, `symbol_context` and `outline` are MCP tools
-  (and `local-worker intel TOOL NAME`) answered synchronously by the service from the CodeIndex (`hub/intel/`). Every answer says `provider` and `precision`:
+  (and `local-worker intel TOOL NAME`) answered synchronously by the service from the CodeIndex (`hub/skills/coding/intelligence/intel/`). Every answer says `provider` and `precision`:
   `syntactic` is a parsed exact-name match, `lexical` a name-contains fallback. They are name-based (same-named symbols are not told apart, at most 8 reference lines per
   file per word, Go interfaces are not found as implementations) and `diagnostics` reports syntax errors and unresolved relative imports only, not types. The interface
-  (`hub/intel/provider.py`) is implemented by the CodeIndex provider and by `hub/intel/lsp.py`, a thin stdio LSP client with a pool of at most two warm servers. A server runs only if the reviewed
+  (`hub/skills/coding/intelligence/intel/provider.py`) is implemented by the CodeIndex provider and by `hub/skills/coding/intelligence/intel/lsp.py`, a thin stdio LSP client with a pool of at most two warm servers. A server runs only if the reviewed
   project profile names it, for example `"lsp": {"python": ["/path/to/basedpyright-langserver", "--stdio"]}`; nothing is installed or started otherwise, and any failure falls back to the CodeIndex answer with the reason.
   Measured on this repository (benchmarks/RESULTS.md): exact where names collide, a tie elsewhere, 20-70 ms warm; used for the Tier-0 tools only, not inside the pipelines.
-- **DelegationSpec** (`hub/spec.py`): goal, kind, targets, changes (with typed `old -> new` mappings), invariants and acceptance criteria, evidence, scope, checks.
+- **DelegationSpec** (`hub/skills/coding/delegation/spec.py`): goal, kind, targets, changes (with typed `old -> new` mappings), invariants and acceptance criteria, evidence, scope, checks.
   MCP `delegate(repo, spec)` or `local-worker spec check|submit FILE` compile it into the same JobRequest as before; `local-worker spec draft "task"` shows what the host
   understands of a natural-language task without a model. Mechanical criteria (`file_unchanged`, `symbol_exists`, `symbol_absent`, `no_new_files`, `check_passes`) are verified
   after the edit and appear as `spec_verification`; an unmet one turns COMPLETE into PARTIAL, `text` criteria are left to the frontier. Natural-language tasks are unchanged.
-- **Execution-guided `fix_test`.** The failing test is run once before the edit; its parsed stack frames (`hub/testparse.py`) are resolved to the enclosing functions
-  (`hub/execctx.py`) and those ranges are shown to the editor ahead of everything else, with a short failure-evidence block. No frames, no change.
+- **Execution-guided `fix_test`.** The failing test is run once before the edit; its parsed stack frames (`hub/skills/coding/execution/testparse.py`) are resolved to the enclosing functions
+  (`hub/skills/coding/execution/execctx.py`) and those ranges are shown to the editor ahead of everything else, with a short failure-evidence block. No frames, no change.
 - **Outcomes.** `record_review` now needs a reason code on a rejection or takeover (`wrong_localization` and `context_missing` were added). `record_outcome JOB` (or `local-worker outcome JOB`;
   it also runs automatically on a rejection or takeover) stores `final-frontier.diff`: the authorized files as the worker's snapshot saw them against your tree now.
-  `local-worker stats` prints acceptance by role and kind; benchmark (`eval`, `benchmark`) jobs are excluded by their `caller`. `hub/outcomes.py:row` derives a feature row per job; nothing is duplicated.
+  `local-worker stats` prints acceptance by role and kind; benchmark (`eval`, `benchmark`) jobs are excluded by their `caller`. `hub/skills/coding/delegation/outcomes.py:row` derives a feature row per job; nothing is duplicated.
 - **Apply is transactional.** Targets are validated first, the current bytes are backed up and journalled, files are replaced one by one and any failure restores them
   (`apply.journal`; a journal left by a crash is rolled back when the service starts). `apply_result` refuses while a file the job only read changed (`read_paths` directories and
   files cited as `path:line` by attached evidence jobs are tracked) unless `revalidate` passes or `accept_stale` is set. For a git work tree the private workspace is a shared clone
   of HEAD plus your uncommitted files, so there is no size cap; a plain directory is still copied with the 300 MB cap.
 - **Replay fixtures.** `local-worker incident JOB --fixture DIR` writes the task, the pre-edit files and the raw replies of an Editor job (PRIVATE source: review before committing);
   fixtures placed in `tests/data/incidents/` are replayed by `tests/test_incident_fixtures.py` through the real edit pipeline.
-- **Test selection** (`hub/testmap.py`, MCP `recommend_checks`): ranks test files for changed paths from the import graph (two hops), names (`test_x.py`, `x.test.ts`), symbols the changed files define
+- **Test selection** (`hub/skills/coding/intelligence/testmap.py` and `hub/skills/coding/validation/templates.py`, MCP `recommend_checks`): ranks test files for changed paths from the import graph (two hops), names (`test_x.py`, `x.test.ts`), symbols the changed files define
   and recorded failures of earlier real jobs. If the reviewed project profile has a check whose argv holds the single element `{tests}`, the result carries that check filled with validated,
   indexed test paths only (no option-like or shell-like text); you submit it through `run_checks`. A template can never run unfilled (profile expansion, the runner and `run_check_sync` refuse it), so put such a
   check in its own profile group. Backtest on this repository's last commits (7 commits that changed both source and tests, mostly 15-20 files each): about half of the tests a commit changed were in the top
   min(k, n); too few and too large commits to call that a measurement.
-- **Routing advice** (`hub/router.py`, MCP `estimate_delegation`, `GET /api/outcomes` for calibration): hard rules first (Tier 0 lookups and checks, oversized or ambiguous or security-wording tasks and tasks smaller than
+- **Routing advice** (`hub/skills/coding/delegation/router.py`, MCP `estimate_delegation`, `GET /api/outcomes` for calibration): hard rules first (Tier 0 lookups and checks, oversized or ambiguous or security-wording tasks and tasks smaller than
   their handoff stay with the frontier), then a Beta estimate per (role, kind) from the evaluation pass rates at half weight plus your real reviews (benchmark jobs excluded), turned into an expected net saving in relative effort
   units (a rejected job costs a review plus a share of the task). It is advisory and prior-dominated until you have recorded real reviews with kinds; it is not a trained model.
 - **Layers** (`tests/test_import_boundaries.py`): every module is classified core / coding / research / personal; coding and research may not import each other and skill modules may not import the job machinery.

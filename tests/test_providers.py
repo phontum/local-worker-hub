@@ -6,12 +6,13 @@ import httpx
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from hub import ask, calls
-from hub.providers import base, registry
-from hub.providers.base import ProviderError
-from hub.providers.clock import ClockArgs
-from hub.providers.fx import FxArgs
-from hub.providers.weather import WeatherArgs
+from hub.skills.research import ask
+from hub import calls
+from hub.skills.research.providers import base, registry
+from hub.skills.research.providers.base import ProviderError
+from hub.skills.research.providers.clock import ClockArgs
+from hub.skills.research.providers.fx import FxArgs
+from hub.skills.research.providers.weather import WeatherArgs
 from hub.report import final_report
 from test_pipelines_v3 import PREFS, ask_job, fake_models
 

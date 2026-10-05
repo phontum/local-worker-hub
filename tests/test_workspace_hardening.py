@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from hub import calls, pipelines, textedit, workspace
+from hub import calls, pipelines
+from hub.skills.coding.editing import textedit, workspace
 from hub.models import Check, JobRequest
 from hub.report import final_report
 from hub.scoped import ScopedFiles, ScopeError

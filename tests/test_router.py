@@ -1,4 +1,4 @@
-from hub import router
+from hub.skills.coding.delegation import router
 
 def reviewed(role, kind, decision, caller='mcp'):
     return {'request': {'role': role, 'kind': kind, 'caller': caller}, 'review': {'decision': decision}}

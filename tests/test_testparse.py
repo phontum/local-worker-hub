@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from hub.testparse import parse
+from hub.skills.coding.execution.testparse import parse
 
 DATA = Path(__file__).parent / 'data' / 'testparse'
 
@@ -63,7 +63,7 @@ def test_unknown_output_and_argv_hint_and_truncation():
 
 
 def test_direct_report_lists_failing_tests_without_a_model():
-    from hub.validation import analysis_evidence, direct_report, parsed_output
+    from hub.skills.coding.validation.validation import analysis_evidence, direct_report, parsed_output
     output = sample('pytest-q.txt')
     counts, failures = parsed_output(output, ['python', '-m', 'pytest'])
     assert counts == {'total': 8, 'passed': 5, 'failed': 3, 'skipped': 0, 'format': 'pytest'}
@@ -80,7 +80,7 @@ def test_direct_report_lists_failing_tests_without_a_model():
 def test_summary_and_brief_views_carry_a_bounded_failure_list():
     from hub.presentation import result_brief, result_summary
     output = sample('pytest-q.txt')
-    from hub.validation import parsed_output
+    from hub.skills.coding.validation.validation import parsed_output
     counts, failures = parsed_output(output, ['pytest'])
     check = {'name': 'pytest', 'status': 'failed', 'exit_code': 1, 'counts': counts, 'failures': failures, 'artifact': 'check-0.log'}
     report = ('LOCAL_WORKER_REPORT\nStatus: PARTIAL\nFindings:\nx\nFiles:\nNone\nChecks:\nx\nRisks:\nx\nEND_LOCAL_WORKER_REPORT')
