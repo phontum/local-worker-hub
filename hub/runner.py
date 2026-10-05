@@ -195,20 +195,42 @@ class Runner:
             own=[event for event in events if event.get('phase')==(phase or label)]
             ids={event['data']['evidence_id'] for event in own if event['kind'] in ('read','search') and event['data'].get('evidence_id')}
             cited=set(re.findall(r'\bE[1-9]\d*\b',report['report']))
-            if not cited or not cited<=ids or any(event['kind']=='read_missing' for event in own):
+            missing=[event['data'].get('path') for event in own if event['kind']=='read_missing']
+            # The host lists what was actually read; the model need not cite IDs. Downgrade only when it cites
+            # evidence that was never observed, or nothing was read or searched at all.
+            if not ids or not cited<=ids:
+                reason='Cited evidence that was never observed' if cited-ids else 'No file evidence was observed'
                 report=parse_report(report['report'].replace('Status: COMPLETE','Status: PARTIAL',1).replace(
-                    'Risks:\n','Risks:\nUnverified or missing requested source evidence; frontier inspection required. ',1))
+                    'Risks:\n','Risks:\n'+reason+'; frontier inspection required. ',1))
             else:
                 verified=[]
                 for event in own:
                     data=event['data']
-                    if data.get('evidence_id') not in cited:continue
+                    if data.get('evidence_id') not in ids:continue
                     if event['kind']=='read':
                         verified.append(f"{data['evidence_id']} {data['path']}:{data['start']}")
                     elif event['kind']=='search':
                         verified += [f"{data['evidence_id']} {m['path']}:{m['line']}" for m in data['matches'][:8]]
-                report=parse_report(report['report'].replace('Files:\n','Files:\n'+'\n'.join(verified[:12])+'\n',1))
+                text=report['report'].replace('Files:\n','Files:\n'+'\n'.join(verified[:12])+'\n',1)
+                if missing:text=text.replace('Risks:\n','Risks:\nSome requested paths could not be read: '+', '.join(str(m) for m in missing[:5])+'. ',1)
+                report=parse_report(text)
         return session,report
+
+    async def execute_structured(self,job,request,directory,label,prompt,phase,timeout=None):
+        """One tools-off structured board phase in a fresh subprocess/context; same cumulative budget as execute_model."""
+        budget=timeout or request.timeout
+        if job['id'] in self.model_remaining:
+            budget=min(budget,self.model_remaining.get(job['id'],request.model_budget()))
+            if budget<1:raise TimeoutError('Cumulative model-work budget exhausted')
+        started=time.monotonic()
+        try:
+            await self.process([sys.executable,'-m','hub.engine','--job-dir',str(directory),'--label',label,'--prompt',prompt,'--phase',phase,'--structured'],job,directory,label,
+                {**{k:v for k,v in os.environ.items() if k in ('PATH','HOME','USER','LOGNAME','LANG','LC_ALL','LD_LIBRARY_PATH')},
+                    'PYTHONPATH':str(PROJECT),'PWD':str(directory/'workspace'),
+                    'LOCAL_WORKER_STATE':str(STATE),'LOCAL_WORKER_CONFIG':str(CONFIG)},budget)
+        finally:
+            if job['id'] in self.model_remaining:self.model_remaining[job['id']]=max(0,self.model_remaining[job['id']]-(time.monotonic()-started))
+        return json.loads((directory/(label+'.result.json')).read_text())
 
     async def execute_opencode(self,job,request,directory,label,prompt,recovery=False):
         cfg=runtime_config(request,directory,self.token,recovery)
@@ -371,35 +393,34 @@ class Runner:
             checks=await self.checks(job,request,directory,attempt=attempt,deadline=deadline)
             diff=self.scoped_diff(request,originals)
             path=directory/'scoped-diff.txt';path.write_text(diff);path.chmod(0o600)
-            truncated=len(diff)>24000
-            if not diff and editor['status']=='COMPLETE':
-                editor=parse_report(editor['report'].replace('Status: COMPLETE','Status: PARTIAL',1))
-            review_brief=(prompt+'\nOriginal editor report:\n'+editor['report']+'\nActual authorized-file diff:\n'+
-                          (diff[:24000] or '[No authorized file change]')+ ('\n[Diff truncated; full artifact requires frontier review.]' if truncated else '')+'\nRecorded checks:\n'+analysis_evidence(checks))
-            review=await phase('review-'+str(attempt),review_brief,'review')
-            if truncated and review['status']=='COMPLETE':review=parse_report(review['report'].replace('Status: COMPLETE','Status: PARTIAL',1))
-            attempts.append({'attempt':attempt,'edit_status':editor['status'],'review_status':review['status'],
-                             'review_findings':review['findings'][:1500],
+            failing=[c for c in checks if failed(c)]
+            passed=bool(checks) and not failing and bool(diff)
+            # Deterministic checks decide. The local review is optional (--review) and advisory: it never changes the outcome.
+            review=None
+            if request.review_pass:
+                truncated=len(diff)>24000
+                review_brief=(prompt+'\nOriginal editor report:\n'+editor['report']+'\nActual authorized-file diff:\n'+
+                              (diff[:24000] or '[No authorized file change]')+('\n[Diff truncated; full artifact requires frontier review.]' if truncated else '')+'\nRecorded checks:\n'+analysis_evidence(checks))
+                review=await phase('review-'+str(attempt),review_brief,'review')
+            attempts.append({'attempt':attempt,'edit_status':editor['status'],'review_status':review['status'] if review else 'skipped',
+                             'review_findings':review['findings'][:1500] if review else '',
                              'checks':[{k:c.get(k) for k in ('name','status','exit_code','artifact','reason')} for c in checks]})
             self.store.event(job['id'],'attempt',attempts[-1])
-            if editor['status']=='COMPLETE' and review['status']=='COMPLETE' and checks and all(not failed(c) for c in checks):
-                body=('LOCAL_WORKER_REPORT\nStatus: COMPLETE\nFindings:\n'+editor['findings']+
-                      '\nLocal review: '+review['findings']+'\nFiles:\n'+editor['files']+
-                      '\nChecks:\n'+direct_report(checks)['checks']+'\nRisks:\n'+review['risks']+
+            if passed:
+                notes=(('\nLocal review (advisory): '+review['findings']) if review else '')
+                body=('LOCAL_WORKER_REPORT\nStatus: COMPLETE\nFindings:\n'+editor['findings']+notes+
+                      '\nFiles:\n'+editor['files']+'\nChecks:\n'+direct_report(checks)['checks']+
+                      '\nRisks:\n'+(editor['risks'] if editor['status']!='COMPLETE' else (review['risks'] if review else 'None identified.'))+
                       '\nEND_LOCAL_WORKER_REPORT')
                 return parse_report(body),checks,sessions,seconds,attempts
-            if attempt>=request.repair_attempts or any(c.get('status') in ('blocked','cancelled') or c.get('timed_out') for c in checks):break
-            if attempt>=1:
-                diagnosis=await phase('diagnose-'+str(attempt),review_brief+'\nPrior repairs:\n'+json.dumps(attempts),'diagnose')
-                if diagnosis['status']=='BLOCKED':break
-                findings=diagnosis['findings']
-            else:findings=review['findings']
+            if attempt>=request.repair_attempts or not failing or any(c.get('status') in ('blocked','cancelled') or c.get('timed_out') for c in checks):break
             editor=await phase('repair-'+str(attempt+1),prompt+'\nAuthorized files: '+json.dumps(request.allowed_paths)+
-                               '\nRequired correction: '+findings+'\nRecorded failed checks:\n'+analysis_evidence(checks)+
-                               '\nCurrent diff:\n'+diff[:24000]+'\nMake one targeted repair.','edit')
+                               '\nThe approved checks failed. Fix the cause with one targeted repair.\nRecorded failed checks:\n'+analysis_evidence(checks)+
+                               '\nCurrent diff:\n'+diff[:24000],'edit')
+        remaining=('Checks failed: '+', '.join(c['name'] for c in failing)) if failing else ('No authorized file change was made' if not diff else 'No approved check ran')
         body=('LOCAL_WORKER_REPORT\nStatus: PARTIAL\nFindings:\n'+editor['findings']+
-              '\nRemaining issue: '+review['findings']+'\nFiles:\n'+editor['files']+
-              '\nChecks:\n'+direct_report(checks)['checks']+'\nRisks:\n'+review['risks']+
+              '\nRemaining issue: '+remaining+'\nFiles:\n'+editor['files']+
+              '\nChecks:\n'+direct_report(checks)['checks']+'\nRisks:\n'+(review['risks'] if review else editor['risks'])+
               '\nEND_LOCAL_WORKER_REPORT')
         return parse_report(body),checks,sessions,seconds,attempts
 
@@ -480,7 +501,7 @@ class Runner:
         if roles.exists():
             snapshot=directory/'role-config.json';snapshot.write_bytes(roles.read_bytes());snapshot.chmod(0o600)
         sessions=[];before=None;checks=[];result={};lock=None;model_seconds=0;report=None;attempts=[];originals={}
-        if request.execution_preset or request.needs_answer_review():self.model_remaining[job['id']]=request.model_budget()
+        if request.execution_preset or request.board or request.needs_answer_review():self.model_remaining[job['id']]=request.model_budget()
         started=time.monotonic();beat=asyncio.create_task(self.heartbeat(job['id']))
         try:
             if request.role in ('personal','researcher'):
@@ -511,9 +532,22 @@ class Runner:
             prompt+=prepare_evidence(self.store,request,directory)
             if request.role=='validator':prompt+='\nObserved checks:\n'+analysis_evidence(checks)
             if request.role=='editor':prompt+='\nAuthorized files: '+json.dumps(request.allowed_paths)
-            answer_review=None
+            answer_review=None;board_result=None
             if request.workflow=='implement':
                 report,checks,sessions,model_seconds,attempts=await self.implement(job,request,directory,prompt)
+            elif request.board:
+                from .board import Board
+                outcome=await Board(self,job,request,directory).run(prompt)
+                board_result=outcome['board']
+                if outcome['answer']:report,checks,sessions,answer_review=outcome['answer']
+                else:
+                    # Skipped or degraded board: answer with the plain single flow.
+                    self.phase(job['id'],'model',deadline=time.time()+self.model_remaining[job['id']])
+                    model_started=time.monotonic()
+                    try:
+                        session,report=await self.execute_model(job,request,directory,'work',prompt)
+                        sessions.append(session)
+                    finally:model_seconds+=time.monotonic()-model_started
             elif request.needs_answer_review():
                 report,checks,sessions,answer_review=await self.answer_review(job,request,directory,prompt,originals,checks)
             elif request.role=='validator' and request.summary_mode=='none' and not request.source_job_id:
@@ -551,7 +585,14 @@ class Runner:
                 'before':before,'after':after,'usage':self.usage(job['id'],sessions),'model':MODEL if sessions else None,
                 'workspace_verified':not bool(request.source_job_id),'repo':request.repo,'review':'unreviewed','checks_failed':check_failure,
                 'report_origin':'model' if sessions else 'harness','source_job_id':request.source_job_id,
-                'attempts':attempts,'workflow':request.workflow,'answer_review':answer_review}
+                'attempts':attempts,'workflow':request.workflow,'answer_review':answer_review,'board':board_result}
+            ask_record=directory/'ask.json'
+            if ask_record.is_file():
+                recorded=json.loads(ask_record.read_text())
+                result['ask']={'decision':recorded.get('decision'),'queries':(recorded.get('retrieval') or {}).get('queries'),
+                    'providers':(recorded.get('retrieval') or {}).get('providers'),'failures':((recorded.get('retrieval') or {}).get('failures') or [])[:4],
+                    'pages':((recorded.get('retrieval') or {}).get('pages') or [])[:6],'excerpts':recorded.get('excerpts',[])[:12],
+                    'used':(recorded.get('answer') or {}).get('used',[])}
             verification=directory/('answer-review.web-verification.json' if answer_review else 'work.web-verification.json')
             result['research_plans']=[p.name for p in (directory/'work.research-plan.json',directory/'answer-review.research-plan.json') if p.is_file()]
             if verification.is_file():

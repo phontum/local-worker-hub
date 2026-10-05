@@ -14,7 +14,7 @@ try{
  await page.goto('http://127.0.0.1:8765');await page.getByLabel('Pairing code').fill(code);
  await page.getByRole('button',{name:'Connect',exact:true}).click();
  await page.locator(`button.job[data-job-id="${ident}"]`).click();
- await page.getByText('Local model trace',{exact:true}).waitFor();
+ await page.getByRole('tab',{name:'Evidence',exact:true}).click();
  if(job.result?.answer_review){
   await page.getByRole('heading',{name:'Requirements review',exact:true}).waitFor();
   assert.equal(await page.getByRole('link',{name:'Initial answer',exact:true}).getAttribute('href'),`/api/jobs/${ident}/artifacts/draft-report.txt`);
@@ -42,6 +42,8 @@ try{
   }
  }
 
+ await page.getByRole('tab',{name:'Trace',exact:true}).click();
+ await page.getByText('Local model trace',{exact:true}).waitFor();
  await page.locator('.trace-output strong').filter({hasText:'thinking'}).first().waitFor({timeout:30000});
  const expected=await page.evaluate(async id=>(await(await fetch(`/api/jobs/${id}/trace?offset=0&limit=100`)).json()).segments.filter(x=>x.kind==='thinking').map(x=>x.text).join(''),ident);
  assert.ok(expected.length>0);

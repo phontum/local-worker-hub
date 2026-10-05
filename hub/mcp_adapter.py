@@ -3,7 +3,7 @@ from mcp.types import ToolAnnotations
 from urllib.parse import quote, urlencode
 import re
 from .client import call
-from .models import JobRequest, Review
+from .models import JobRequest, Review, default_timeout
 
 READ = ToolAnnotations(readOnlyHint=True,destructiveHint=False,idempotentHint=True,openWorldHint=False)
 WRITE = ToolAnnotations(readOnlyHint=False,destructiveHint=False,idempotentHint=True,openWorldHint=False)
@@ -26,16 +26,16 @@ def create_server():
                    model_context: int | None=None, model_thinking: bool | None=None,
                    execution_preset: str | None=None, read_paths: list[str] | None=None,
                    evidence_job_ids: list[str] | None=None, handoff_id: str | None=None,
-                   review_pass: bool | None=None) -> dict:
-        """Submit a bounded local task. Researcher accepts only a sanitized public brief; Editor requires exact file scope. Reuse the same key only for transport retries."""
+                   review_pass: bool | None=None, board: bool=False, board_mode: str | None=None, verify: bool=False, agent_loop: bool=False) -> dict:
+        """Submit a bounded local task. Researcher accepts only a sanitized public brief; Editor requires exact file scope. Reuse the same key only for transport retries. Public web roles answer in plain language by default (about 30-60s). verify=true runs strict origin-proof research (slower, may end PARTIAL). board=true is a rarely useful anonymous multi-model deliberation (slower, FIFO queue); skip it when the task is already specified. The call returns immediately: continue other work, then poll get_job (it reports eta_seconds and queue wait) and read get_result."""
         request=JobRequest(role=role,task=task,repo=repo,allowed_paths=allowed_paths or [],checks=checks or [],
             context=context,caller=caller,caller_session=caller_session,idempotency_key=idempotency_key,
-            timeout=timeout if timeout is not None else (120 if execution_preset=='small' else 300),
+            timeout=timeout if timeout is not None else default_timeout(role,execution_preset,board,verify,bool(review_pass)),
             summary_mode=summary_mode,failure_policy=failure_policy,profile_hash=profile_hash,profile_ref=profile_ref,
             check_groups=check_groups or [],parameters=parameters or {},workflow=workflow,
             repair_attempts=repair_attempts,investigate_first=investigate_first,
             model_context=model_context,model_thinking=model_thinking,execution_preset=execution_preset,review_pass=review_pass,
-            read_paths=read_paths or [],evidence_job_ids=evidence_job_ids or [],handoff_id=handoff_id)
+            read_paths=read_paths or [],evidence_job_ids=evidence_job_ids or [],handoff_id=handoff_id,board=board,board_mode=board_mode,verify=verify,agent_loop=agent_loop)
         result=call('POST','/api/jobs',request.model_dump())
         return {'id':result['id'],'state':result['state'],'role':result['request']['role']}
 

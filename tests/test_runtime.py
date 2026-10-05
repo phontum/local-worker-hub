@@ -20,7 +20,7 @@ def test_used_client_lifecycle(monkeypatch):
 @pytest.mark.asyncio
 async def test_engine_denies_out_of_scope_edit(tmp_path,repo,monkeypatch):
     directory=tmp_path/'job';directory.mkdir();(directory/'workspace').mkdir()
-    request=JobRequest(role='editor',task='Update answer',repo=str(repo),allowed_paths=['app.ts'],idempotency_key='engine')
+    request=JobRequest(role='editor',task='Update answer',repo=str(repo),allowed_paths=['app.ts'],idempotency_key='engine',agent_loop=True)
     (directory/'request.json').write_text(request.model_dump_json())
     untouched=repo/'other.txt';untouched.write_text('original')
     n=0;observed=[]
@@ -76,7 +76,7 @@ def test_legacy_import_once_without_acceptance(tmp_path,store):
 async def test_inference_retry_is_identical_bounded_and_never_repeats_tools(tmp_path,monkeypatch,recover):
     import copy
     directory=tmp_path/'job';directory.mkdir()
-    request=JobRequest(role='personal',task='Say Hello!',idempotency_key='retry')
+    request=JobRequest(role='personal',task='Say Hello!',idempotency_key='retry',verify=True)
     (directory/'request.json').write_text(request.model_dump_json())
     from types import SimpleNamespace
     class Tools:

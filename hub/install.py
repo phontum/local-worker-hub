@@ -21,6 +21,10 @@ security, or configuration diagnosis to it.
 Use local-worker for bounded discovery, specified feature slices, evidence-backed
 fixes, approved validation and public documentation research. Prefer one complete
 handoff once behavior and scope are clear; continue independent frontier work.
+Run it like a background subagent: `local-worker delegate [flags] "task"` (Claude Code run_in_background,
+Codex background terminal) prints one compact brief when finished while you keep working;
+`local-worker watch JOB_ID` prints one line per phase. Over MCP use submit_job, then get_job
+(eta_seconds, queue wait) and get_result. For git state use a Validator job with argv checks.
 Small tasks that cost more to
 delegate than to do directly should stay with the primary. Never blindly trust a
 COMPLETE report: inspect important evidence and actual diffs, verify relevant
@@ -46,7 +50,15 @@ counts also receive mechanical checks. Missing reviews never count as success.
 Only the original task is assessed, not the runtime transport/report protocol.
 Extended work/review use thinking; forced final JSON formatting turns disable
 thinking to preserve answer space and record that effective step configuration.
-Implementation already has a fresh review, so it does not gain a third pass;
+Public questions run a host pipeline: a small decision call, host search (local SearXNG, Exa
+fallback), live page reads, then an answer from numbered excerpts with host-written sources in
+the user's units (~/.config/local-worker/preferences.json), usually in 10-20 s. Investigators get
+a repo map and search hits; editors reply with SEARCH/REPLACE blocks the host applies under the
+same scope/freshness guards; --agent-loop keeps the older tool loop.
+--verify (MCP verify=true) adds strict origin-proof research: slower and often PARTIAL.
+--board (MCP board=true) is a rarely useful slow multi-model deliberation with no measured
+benefit; do not use it for specified work, and repository tasks have no board.
+Implementation has no automatic review: passing approved checks decide, --review adds an advisory one;
 direct Validator checks remain zero-token. Local review is not frontier acceptance.
 Public fetch_web defaults to mode=current: bounded direct public origin reads,
 with DNS-pinned connections and checked redirects. Blocked origin reads fall
@@ -76,7 +88,7 @@ failure messages never become search results. The default provider is unchanged.
 LangSearch full page text is reused in cached mode; hosted fallback uses free keyless Exa.
 Editor (--write or --role editor): exact authorized file paths; no shell.
 For a specified feature slice, --workflow implement --repair-attempts 1 performs
-scoped edit, supplied checks, fresh read-only review and one targeted repair.
+scoped edit and supplied checks, with one targeted repair after a failed check.
 --investigate-first adds bounded discovery. The frontier still verifies the diff
 and check evidence before acceptance. Two repairs are experimental only.
 Validator (--role validator): executes explicitly supplied check argv arrays;
@@ -155,7 +167,7 @@ long/failing evidence adds value; original exit codes remain authoritative.
 One local job executes at a time; requests queue. Do not overlap edits with worker
 changes to its authorized files. Capture user changes before delegation; the hub
 also records before/after state. Do not reset, clean or roll back a user's tree.
-Keep Qwen3.5 9B at 16K by default and concurrency at one. Explicit extended
+Keep the default local model (Gemma 4 12B, chosen without a head-to-head comparison) at 16K by default and concurrency at one. Explicit extended
 32K experiments are allowed; do not promote them without measured evaluation. No recursive local-worker/OpenCode invocation is available.
 
 The final report uses LOCAL_WORKER_REPORT / END_LOCAL_WORKER_REPORT and the labels

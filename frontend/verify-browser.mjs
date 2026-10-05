@@ -27,28 +27,37 @@ try {
  await page.getByRole('heading',{name:'Connect this browser'}).waitFor();
  await page.getByLabel('Pairing code').fill(code);
  await page.getByRole('button',{name:'Connect',exact:true}).click();
- await page.getByRole('heading',{name:'Hardware',exact:true}).waitFor();
- await page.getByRole('heading',{name:'Task history',exact:true}).waitFor();
+ await page.getByRole('navigation',{name:'Tasks'}).waitFor();
  await page.getByLabel('Filter tasks').selectOption('validator');
  await page.locator('button.job').filter({hasText:job.task}).first().click();
- await page.getByText('No model inference',{exact:true}).waitFor({timeout:60000});
  await page.getByText('check · quiet-check',{exact:true}).waitFor({timeout:60000});
- await page.getByText('independent · Passed',{exact:true}).waitFor({timeout:60000});
- await page.getByText('dependent · Skipped',{exact:true}).waitFor();
- assert.match(await page.locator('.report').innerText(),/PARTIAL/);
+ await page.locator('.answer').waitFor({timeout:60000});
+ assert.match(await page.locator('.meta').innerText(),/PARTIAL/);
+ await page.getByText('independent passed',{exact:false}).waitFor({timeout:60000});
  assert.equal(artifactRequests.length,0,'logs should be lazy');
+ await page.getByRole('tab',{name:'Evidence',exact:true}).click();
+ await page.getByText('dependent · Skipped',{exact:true}).waitFor();
  await page.getByText('quiet-check · Passed',{exact:true}).click();
  await page.getByRole('button',{name:'Load more output',exact:true}).waitFor();
  assert.equal(artifactRequests.length,1);
  await page.getByRole('button',{name:'Load more output',exact:true}).click();
  await page.waitForTimeout(300);
  assert.equal(artifactRequests.length,2);
- assert.match(await page.locator('.savings').filter({hasText:'Estimated frontier usage avoided'}).innerText(),/0 matched baselines/);
+ // The Stats drawer holds the savings and workflow figures that no longer crowd the main screen.
+ await page.getByRole('button',{name:'Stats',exact:true}).click();
+ await page.getByText('Frontier accepted',{exact:true}).waitFor();
+ await page.getByRole('button',{name:'Close',exact:true}).click();
+ // One screen: the page itself must not scroll at common laptop sizes, even with a long job selected.
+ for(const [width,height] of [[1440,900],[1366,768]]){
+  await page.setViewportSize({width,height});
+  const overflow=await page.evaluate(()=>({page:document.documentElement.scrollHeight-innerHeight,body:document.body.scrollHeight-innerHeight}));
+  assert.ok(overflow.page<=1&&overflow.body<=1,`page scrolls at ${width}x${height}: ${JSON.stringify(overflow)}`);
+ }
  assert.equal(await page.evaluate(()=>document.cookie.includes('worker_session')),false);
- await page.screenshot({path:'/tmp/local-worker-dashboard-desktop.png',fullPage:true});
+ await page.screenshot({path:'/tmp/local-worker-dashboard-desktop.png'});
  await page.setViewportSize({width:390,height:844});
  await page.screenshot({path:'/tmp/local-worker-dashboard-mobile.png',fullPage:true});
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
  assert.deepEqual(errors,[]);
- console.log('Browser pairing, live quiet-check progress, zero-model report, failed/skipped/independent outcomes, lazy paged logs, privacy, mobile layout and runtime checks passed.');
+ console.log('Browser pairing, live progress, report, failed/skipped/independent outcomes, lazy paged logs, stats drawer, no page scroll at laptop sizes, privacy, mobile layout and runtime checks passed.');
 } finally {await browser.close();}

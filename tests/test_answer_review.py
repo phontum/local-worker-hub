@@ -24,7 +24,10 @@ def assessment(status='COMPLETE', requirement_status='met'):
 
 def test_review_defaults_and_authoritative_unknowns(repo):
     request=JobRequest(role='personal',task='Explain',idempotency_key='defaults',execution_preset='extended')
-    assert request.needs_answer_review() and request.context_limit()==32768
+    # Extended no longer implies the strict review for public questions; it still does with --verify or for other roles.
+    assert not request.needs_answer_review() and request.context_limit()==32768
+    assert request.model_copy(update={'verify':True}).needs_answer_review()
+    assert JobRequest(role='investigator',repo=str(repo),task='Explain',idempotency_key='ix',execution_preset='extended').needs_answer_review()
     assert not request.model_copy(update={'review_pass':False}).needs_answer_review()
     assert request.model_copy(update={'execution_preset':'work','review_pass':True}).needs_answer_review()
     assert not request.model_copy(update={'execution_preset':'work'}).needs_answer_review()
@@ -151,7 +154,7 @@ async def test_review_fresh_context_thinking_and_ledger(tmp_path,monkeypatch,thi
 @pytest.mark.parametrize('packet',[{}, {'findings':'Hello!'}])
 async def test_empty_structured_output_preserves_session_without_parser_crash(tmp_path,monkeypatch,packet):
     directory=tmp_path/'job';directory.mkdir()
-    request=JobRequest(role='personal',task='Hello',idempotency_key='empty',execution_preset='extended')
+    request=JobRequest(role='personal',task='Hello',idempotency_key='empty',execution_preset='extended',verify=True)
     (directory/'request.json').write_text(request.model_dump_json());seen=[]
     async def response(client,url,body,headers,on_segment):
         seen.append(body)
@@ -166,7 +169,7 @@ async def test_empty_structured_output_preserves_session_without_parser_crash(tm
 @pytest.mark.parametrize('failure',[None,'timeout','missing_ledger'])
 async def test_orchestrator_two_passes_preserves_original_and_draft(store,failure):
     original='Explain in exactly two bullets. Use Celsius, never Fahrenheit. Include a source.'
-    request=JobRequest(role='personal',task=original,idempotency_key=str(failure),execution_preset='extended')
+    request=JobRequest(role='personal',task=original,idempotency_key=str(failure),execution_preset='extended',review_pass=True)
     job=store.submit(request);runner=Runner(store,'token');calls=[]
     async def model(_job,_request,directory,label,prompt,**kwargs):
         calls.append((label,prompt,kwargs))
@@ -228,7 +231,7 @@ async def test_validator_summary_review_keeps_actual_failed_exit_code(repo,store
     assert result['checks'][0]['exit_code']==1 and result['worker_status']=='PARTIAL'
 
 
-@pytest.mark.parametrize('flags,expected',[(['--extended'],True),(['--extended','--no-review'],False),(['--review'],True)])
+@pytest.mark.parametrize('flags,expected',[(['--extended'],False),(['--extended','--review'],True),(['--extended','--verify'],True),(['--extended','--no-review'],False),(['--review'],True)])
 def test_cli_review_selection(repo,monkeypatch,flags,expected):
     from hub import client
     seen=[]

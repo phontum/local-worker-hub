@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from .models import JobRequest, Review
 from .settings import initialize, STATE, PROJECT
+from .model_registry import model_name, allowed_names, OLLAMA
 from .store import Store
 from .runner import Runner, stop_process
 from .presentation import result_summary, result_brief, progress_summary, history_item
@@ -30,13 +31,40 @@ class AnalysisRequest(BaseModel):
 
 
 def artifact_path(ident, name):
-    allowed={'report.txt','draft-report.txt','answer-review.json','work.web-verification.json','answer-review.web-verification.json','work.research-plan.json','answer-review.research-plan.json','scoped-diff.txt','before-status.txt','after-status.txt','before-diff.txt','after-diff.txt','before-staged.txt','after-staged.txt'}
-    if name not in allowed and not re.fullmatch(r'check-(?:\d+-)?\d+\.log',name):
+    allowed={'ask.json','report.txt','draft-report.txt','answer-review.json','work.web-verification.json','answer-review.web-verification.json','work.research-plan.json','answer-review.research-plan.json','scoped-diff.txt','before-status.txt','after-status.txt','before-diff.txt','after-diff.txt','before-staged.txt','after-staged.txt'}
+    if name not in allowed and not re.fullmatch(r'check-(?:\d+-)?\d+\.log',name) and not re.fullmatch(r'board-[a-z0-9.-]+\.(?:json|txt)',name):
         raise HTTPException(403,'Only reports, diffs and check outputs are exposed')
     path=STATE/'jobs'/ident/name
     if path.is_symlink():raise HTTPException(403,'Symlink artifact denied')
     if not path.is_file():raise HTTPException(404,'Artifact unavailable')
     return path
+
+LOW_MEMORY_MB = int(os.environ.get('LOCAL_WORKER_MIN_AVAILABLE_MB', '2500'))
+
+async def relieve_memory(threshold_mb=None):
+    """Unload resident models when host RAM is low.
+
+    llama.cpp keeps its prompt cache in host RAM, growing with every distinct prompt prefix (about 0.5 GB per long
+    Gemma prompt, 8 GB default limit) and the Linux OOM killer ends Ollama mid-request on a small WSL host.
+    Unloading frees it; the next request reloads (about 10s). LLAMA_ARG_CACHE_RAM on the Ollama service bounds it at the source.
+    """
+    threshold = (threshold_mb or LOW_MEMORY_MB)
+    available = psutil.virtual_memory().available // 2**20
+    if available >= threshold:
+        return None
+    unloaded = []
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=5), trust_env=False) as client:
+        try:
+            unloaded = [m['name'] for m in (await client.get(OLLAMA + '/api/ps')).json().get('models', [])]
+            for name in unloaded:
+                await client.post(OLLAMA + '/api/generate', json={'model': name, 'keep_alive': 0})
+            for _ in range(30):
+                if not (await client.get(OLLAMA + '/api/ps')).json().get('models'):
+                    break
+                await asyncio.sleep(.5)
+        except (httpx.HTTPError, ValueError):
+            return {'available_mb': available, 'threshold_mb': threshold, 'unloaded': [], 'error': 'Ollama unavailable'}
+    return {'available_mb': available, 'threshold_mb': threshold, 'unloaded': unloaded}
 
 ALLOWED_HOSTS = {'127.0.0.1:8765','localhost:8765'}
 ORIGINS = {'http://127.0.0.1:8765','http://localhost:8765'}
@@ -142,9 +170,9 @@ def create_app(store=None, start_workers=True):
         value=store.get(ident)
         if not value:raise HTTPException(404,'Unknown job')
         if view=='compact':
-            return history_item(value) | {'request':{k:v for k,v in value['request'].items() if k in ('role','task','repo','caller','summary_mode','workflow','execution_preset','handoff_id','review_pass')},
+            return history_item(value) | {'request':{k:v for k,v in value['request'].items() if k in ('role','task','repo','caller','summary_mode','workflow','execution_preset','handoff_id','review_pass','board','board_mode')},
                                          'review':value['review'],'result':result_summary(value) if value['result'] else None,
-                                         'progress':progress_summary(value,store.queue_position(ident))}
+                                         'progress':progress_summary(value,store.queue_position(ident),queue_wait(value))}
         return value
 
     @app.get('/api/jobs/{ident}/result',dependencies=[Depends(auth)])
@@ -152,8 +180,19 @@ def create_app(store=None, start_workers=True):
         value=job(ident)
         return result_brief(value) if view=='brief' else result_summary(value) if view=='summary' else value.get('result')
 
+    def queue_wait(value):
+        # Upper bound: the running job's unused budget plus the budgets of queued jobs ahead of this one.
+        if value['state']!='queued':return None
+        total=0
+        for other in store.list(200):
+            if other['id']==value['id'] or other['state'] not in ('queued','running') or (other['state']=='queued' and other['created']>value['created']):continue
+            used=(time.time()-(other.get('started') or other['created'])) if other['state']=='running' else 0
+            total+=max(0,other['request']['timeout']-used)
+        return round(total)
+
     @app.get('/api/jobs/{ident}/progress',dependencies=[Depends(auth)])
-    def progress(ident:str):return progress_summary(job(ident),store.queue_position(ident))
+    def progress(ident:str):
+        value=job(ident);return progress_summary(value,store.queue_position(ident),queue_wait(value))
 
     @app.get('/api/jobs/{ident}/wait',dependencies=[Depends(auth)])
     async def wait(ident:str,timeout_seconds:int=Query(default=25,ge=1,le=30)):
@@ -238,7 +277,7 @@ def create_app(store=None, start_workers=True):
         current=job(ident)
         if current['state']!='running':raise HTTPException(409,'Inference requires a running job')
         body=await request.json()
-        if body.get('model')!='qwen3.5:9b':raise HTTPException(403,'Only the configured local model is allowed')
+        if body.get('model')!=model_name('qwen'):raise HTTPException(403,'Only the legacy OpenCode model is allowed on this endpoint')
         names=[t.get('function',{}).get('name','') for t in body.get('tools',[])]
         systems=[m.get('content','') for m in body.get('messages',[]) if m.get('role')=='system']
         store.event(ident,'request_metadata',{'tools':names,'system_chars':sum(len(str(s)) for s in systems),
@@ -296,15 +335,17 @@ def create_app(store=None, start_workers=True):
         current=job(ident)
         if current['state']!='running':raise HTTPException(409,'Inference requires a running job')
         body=await request.json()
-        if body.get('model')!='qwen3.5:9b':
+        if body.get('model') not in allowed_names():
             raise HTTPException(403,'Only bounded local inference is allowed')
         options=body.get('options') or {}
         if options.get('num_ctx') not in (16384,32768) or not 1<=options.get('num_predict',0)<=4096:
             raise HTTPException(400,'Unsupported context or output budget')
+        relieved=await relieve_memory()
+        if relieved:store.event(ident,'memory-guard',relieved)
         started=time.monotonic()
         def record_usage(value):
             prompt=value.get('prompt_eval_count',0) or 0;output=value.get('eval_count',0) or 0
-            store.event(ident,'inference',{'input':prompt,'output':output,'cache_read':0,'cache_write':0,
+            store.event(ident,'inference',{'model':body['model'],'input':prompt,'output':output,'cache_read':0,'cache_write':0,
                 'cache_breakdown_available':False,'reasoning':0,'reasoning_breakdown_available':False,'context_tokens':prompt,
                 'context_limit':options['num_ctx'],'seconds':time.monotonic()-started,
                 'prompt_eval_seconds':(value.get('prompt_eval_duration') or 0)/1e9,
@@ -316,6 +357,12 @@ def create_app(store=None, start_workers=True):
             client=httpx.AsyncClient(timeout=httpx.Timeout(900,connect=5),trust_env=False)
             try:
                 upstream=await client.send(client.build_request('POST','http://127.0.0.1:11434/api/chat',json=body),stream=True)
+            except httpx.TransportError as error:
+                # Ollama dropping the connection (for example killed by the OOM killer) is a gateway failure the
+                # engine may retry once, not an opaque internal error.
+                await client.aclose()
+                store.event(ident,'inference-error',{'upstream_status':None,'message':'Ollama connection failed: '+type(error).__name__})
+                raise HTTPException(502,'Ollama connection failed; see private inference-error event')
             except BaseException:
                 await client.aclose();raise
             if upstream.status_code!=200:

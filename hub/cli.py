@@ -7,6 +7,35 @@ import time
 import uuid
 from urllib.parse import urlencode, quote
 from .settings import URL, MODEL, PROJECT, STATE
+from .models import default_timeout
+LOW_MEMORY_MB = int(os.environ.get('LOCAL_WORKER_MIN_AVAILABLE_MB', '2500'))
+
+def setup_searxng(port, assume_yes):
+    """Write private SearXNG settings (random secret) and start the localhost-only container with docker compose."""
+    import secrets, shutil, subprocess
+    from .settings import CONFIG
+    target=CONFIG/'searxng';target.mkdir(mode=0o700,parents=True,exist_ok=True)
+    settings=target/'settings.yml'
+    if not settings.exists():
+        template=(PROJECT/'deploy/searxng/settings.template.yml').read_text()
+        settings.write_text(template.replace('__SECRET__',secrets.token_hex(32)));settings.chmod(0o644)  # read by the container user
+    shutil.copyfile(PROJECT/'deploy/searxng/compose.yml',target/'compose.yml')
+    command=['docker','compose','-f',str(target/'compose.yml'),'up','-d']
+    print('Will run: SEARXNG_PORT='+str(port)+' '+' '.join(command),file=sys.stderr)
+    if not assume_yes and (not sys.stdin.isatty() or input('Start the local SearXNG container now? [y/N] ').strip().lower()!='y'):
+        raise SystemExit('Not started. Run the command above yourself, then: local-worker web configure searxng')
+    subprocess.run(command,check=True,env={**os.environ,'SEARXNG_PORT':str(port)})
+    from .web_provider import searxng_health
+    for _ in range(30):
+        if searxng_health(f'http://127.0.0.1:{port}'):return
+        time.sleep(2)
+    raise SystemExit('SearXNG did not answer JSON searches within 60s; check: docker logs local-worker-searxng')
+
+def exit_code(state, worker_status, error=None):
+    if state == 'cancelled': return 130
+    if state == 'timed_out': return 124
+    if state == 'failed': return 3 if not error else 4
+    return 0 if worker_status == 'COMPLETE' else 2
 
 def main():
     os.umask(0o077)
@@ -23,13 +52,16 @@ def main():
     from .client import call
     command=sys.argv[1] if len(sys.argv)>1 else ''
     if command=='web':
-        p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('action',choices=['status','configure'])
-        p.add_argument('provider',choices=['exa','langsearch'],nargs='?');args=p.parse_args()
+        p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('action',choices=['status','configure','setup-searxng'])
+        p.add_argument('provider',choices=['exa','langsearch','searxng'],nargs='?');p.add_argument('--port',type=int,default=8888);p.add_argument('--yes',action='store_true');args=p.parse_args()
         from .web_provider import selection, configure, langsearch_key
         from .settings import CONFIG
         try:
-            if args.action=='configure':
-                if not args.provider:p.error('configure requires exa or langsearch')
+            if args.action=='setup-searxng':
+                setup_searxng(args.port,args.yes)
+                configure('searxng',f'http://127.0.0.1:{args.port}')
+            elif args.action=='configure':
+                if not args.provider:p.error('configure requires exa, langsearch or searxng')
                 if args.provider=='langsearch' and not (CONFIG/'langsearch-api-key').exists():
                     if not sys.stdin.isatty():p.error('Create the private ~/.config/local-worker/langsearch-api-key file first, or configure from an interactive terminal')
                     import getpass
@@ -38,10 +70,13 @@ def main():
                     CONFIG.mkdir(mode=0o700,parents=True,exist_ok=True)
                     fd=os.open(CONFIG/'langsearch-api-key',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
                     with os.fdopen(fd,'w') as out:out.write(key)
-                configure(args.provider)
+                configure(args.provider,*( [f'http://127.0.0.1:{args.port}'] if args.provider=='searxng' else []))
             value=selection()
             value['known_url_extraction']='direct public origin first; explicitly unverified hosted fallback; cached mode reuses LangSearch text'
             value['langsearch_key_configured']=(CONFIG/'langsearch-api-key').is_file()
+            if value['search_provider']=='searxng':
+                from .web_provider import searxng_health
+                value['searxng_healthy']=searxng_health(value.get('searxng_url','http://127.0.0.1:8888'))
             value['search_fallback']='Exa transient failure -> configured free LangSearch; reported in search evidence; per-job cooldown across passes'
             print(json.dumps(value,indent=2))
         except Exception as e:print(str(e),file=sys.stderr);sys.exit(4)
@@ -97,20 +132,49 @@ def main():
             print(json.dumps(value,indent=2))
         except Exception as e:print(str(e),file=sys.stderr);sys.exit(4)
         return
+    if command=='watch':
+        p=argparse.ArgumentParser(description='One line per phase change, then DONE <state> <status>; for background monitoring.')
+        p.add_argument('command');p.add_argument('job_id');p.add_argument('--interval',type=float,default=3)
+        args=p.parse_args()
+        from .mcp_adapter import job_path
+        last=None
+        while True:
+            try:status=call('GET',job_path(args.job_id)+'/progress')
+            except Exception as e:print('local-worker: '+str(e),file=sys.stderr);sys.exit(4)
+            if (status['state'],status['phase'])!=last:
+                last=(status['state'],status['phase'])
+                eta=f", ~{round(status['eta_seconds'])}s left" if status.get('eta_seconds') else ''
+                print(f"{status['phase']} ({status['state']}, {round(status['elapsed_seconds'])}s elapsed{eta})",flush=True)
+            if status['state'] not in ('queued','running'):
+                result=call('GET',job_path(args.job_id)+'/result?view=brief') or {}
+                print(f"DONE {status['state']} {result.get('status')}",flush=True)
+                sys.exit(exit_code(status['state'],result.get('status'),result.get('error')))
+            time.sleep(args.interval)
     if command=='dashboard':
         result=call('POST','/api/pair-code')
         print(f"Dashboard: {URL}\nPairing code (valid five minutes): {result['code']}");return
     if command=='history':print(json.dumps(call('GET','/api/jobs?view=compact'),indent=2));return
     if command=='doctor':
         import shutil,subprocess
-        result={'model':MODEL,'context':16384,'project':str(PROJECT),'state':str(STATE),
+        from .model_registry import models, probe, residency
+        result={'model':MODEL,'models':{alias:{**value,**probe(value['name'])} for alias,value in models().items()},'loaded':residency(),'context':16384,'project':str(PROJECT),'state':str(STATE),
             'opencode':shutil.which('opencode'),'ollama':shutil.which('ollama')}
         try:result['opencode_version']=subprocess.check_output(['opencode','--version'],text=True,timeout=10).strip()
         except Exception as e:result['opencode_error']=str(e)
         aws=Path.home()/'.aws'
+        import psutil
+        memory=psutil.virtual_memory();result['host_memory_mb']={'total':memory.total//2**20,'available':memory.available//2**20}
+        try:
+            environment=subprocess.check_output(['systemctl','show','ollama','--property=Environment'],text=True,timeout=10)
+            result['ollama_prompt_cache_limit']=next((part.split('=',1)[1].strip('"') for part in environment.replace('Environment=','').split() if part.strip('"').startswith('LLAMA_ARG_CACHE_RAM=')),None)
+        except Exception:result['ollama_prompt_cache_limit']='unknown'
+        if not result['ollama_prompt_cache_limit'] or result['ollama_prompt_cache_limit']=='unknown':
+            result['memory_note']='llama.cpp prompt cache lives in host RAM and defaults to 8 GB; on a small host set LLAMA_ARG_CACHE_RAM=512 (MiB) in the Ollama service environment. The hub also unloads models when available RAM drops below '+str(LOW_MEMORY_MB)+' MB.'
         result['codex_sandbox_note']='Protected .aws symlink can prevent Codex shell sandbox startup; credentials and sandbox are unchanged.' if aws.is_symlink() else None
         print(json.dumps(result,indent=2));return
-    p=argparse.ArgumentParser(description='Local assistant. Bare prompts use public web with no repository access; --read-only selects repository investigation.')
+    delegate=len(sys.argv)>1 and sys.argv[1]=='delegate'
+    if delegate:sys.argv.pop(1)
+    p=argparse.ArgumentParser(description='Local assistant. `local-worker delegate ...` runs quietly and prints one compact JSON brief when finished (run it in the background). Bare prompts use public web with no repository access; --read-only selects repository investigation.')
     p.add_argument('--role',choices=['investigator','editor','validator','researcher','personal'])
     p.add_argument('--extended',action='store_true',help='Use 32K context, thinking and an independent requirements review')
     review=p.add_mutually_exclusive_group()
@@ -132,6 +196,10 @@ def main():
     p.add_argument('--profile-ref');p.add_argument('--workflow',choices=['single','implement'],default='single')
     p.add_argument('--repair-attempts',type=int,default=0);p.add_argument('--investigate-first',action='store_true')
     p.add_argument('--model-context',type=int,choices=[16384,32768]);p.add_argument('--model-thinking',choices=['on','off'])
+    p.add_argument('--board',action='store_true',help='Rarely useful: deliberate with an anonymous multi-model board before answering (public web roles; 300s budget, slower)')
+    p.add_argument('--agent-loop',dest='agent_loop',action='store_true',help='Use the older model-driven tool loop instead of the host pipelines (for comparison)')
+    p.add_argument('--verify',action='store_true',help='Strict origin-proof research for public web roles: slower, may end PARTIAL, prints the evidence report')
+    p.add_argument('--board-mode',choices=['lite','full'],help='lite: skeptic + challenger proposals (default); full: four proposals')
     p.add_argument('--parameter',action='append',default=[],help='Explicit nonsecret profile parameter NAME=value')
     p.add_argument('prompt',nargs='*');args=p.parse_args()
     engineering=args.read_only or args.repo or args.read_path or args.allow_path or args.checks or args.context_file or args.profile_ref or args.profile_hash or args.evidence_job
@@ -141,6 +209,7 @@ def main():
     if args.extended and args.model_context==16384:p.error('--extended conflicts with --model-context 16384')
     if args.extended and args.execution_preset not in (None,'extended'):p.error('--extended conflicts with --preset')
     if role=='personal' and preset is None:preset='work'
+    if (args.board or args.board_mode) and (role not in ('personal','researcher') or preset in ('small','extended')):p.error('--board needs a public web role and the default work preset (fixed 16K contexts)')
     if args.read_only and role!='investigator':p.error('--read-only selects Investigator')
     if args.write and role!='editor':p.error('--write selects Editor')
     if not args.prompt and sys.stdin.isatty():p.error('Supply the task through arguments or stdin')
@@ -151,23 +220,31 @@ def main():
         parameters=dict(item.split('=',1) for item in args.parameter)
         request=JobRequest(role=role,task=task,repo=None if role in ('researcher','personal') else (args.repo or str(Path.cwd())),
             allowed_paths=args.allow_path,checks=checks,context=Path(args.context_file).read_text() if args.context_file else '',
-            timeout=args.timeout if args.timeout is not None else (120 if preset=='small' else 300),no_recovery=args.no_recovery,caller=args.caller,caller_session=args.caller_session,
+            timeout=args.timeout if args.timeout is not None else default_timeout(role,preset,args.board,args.verify,bool(args.review_pass)),no_recovery=args.no_recovery,caller=args.caller,caller_session=args.caller_session,
             idempotency_key=args.idempotency_key or uuid.uuid4().hex,summary_mode=args.summary_mode,failure_policy=args.failure_policy,
             profile_hash=args.profile_hash,profile_ref=args.profile_ref,check_groups=args.check_group,parameters=parameters,
             workflow=args.workflow,repair_attempts=args.repair_attempts,investigate_first=args.investigate_first,
             model_context=args.model_context,model_thinking=None if args.model_thinking is None else args.model_thinking=='on',
-            execution_preset=preset,review_pass=args.review_pass,read_paths=args.read_path,evidence_job_ids=args.evidence_job,handoff_id=args.handoff_id)
+            execution_preset=preset,review_pass=args.review_pass,read_paths=args.read_path,evidence_job_ids=args.evidence_job,handoff_id=args.handoff_id,board=args.board,board_mode=args.board_mode,verify=args.verify,agent_loop=args.agent_loop)
     except Exception as e:p.error(str(e))
     ident=None
     try:
         job=call('POST','/api/jobs',request.model_dump());ident=job['id']
-        print('local-worker: job '+ident,file=sys.stderr,flush=True)
+        if not delegate:print('local-worker: job '+ident,file=sys.stderr,flush=True)
         if args.asynchronous:print(json.dumps({'id':ident,'state':job['state']}));return
         last=None
         while job['state'] in ('queued','running'):
-            if job['state']!=last:print('local-worker: '+job['state'],file=sys.stderr,flush=True);last=job['state']
+            if job['state']!=last and not delegate:print('local-worker: '+job['state'],file=sys.stderr,flush=True)
+            last=job['state']
             time.sleep(2 if last=='queued' else 5);job=call('GET','/api/jobs/'+ident+'?view=compact')
+        if delegate:
+            brief=call('GET','/api/jobs/'+ident+'/result?view=brief') or {}
+            print(json.dumps(brief,ensure_ascii=False),flush=True)
+            code=exit_code(job['state'],brief.get('status'),brief.get('error'))
+            if code:sys.exit(code)
+            return
         result=call('GET','/api/jobs/'+ident+'/result?view=summary') or {}
+        if result.get('truncated') and not args.json:result={**result,**(call('GET','/api/jobs/'+ident+'/result?view=full') or {})}
         if args.json:print(json.dumps(result,indent=2))
         elif result.get('report'):
             if role=='personal':

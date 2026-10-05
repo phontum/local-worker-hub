@@ -1,0 +1,15 @@
+# Copied to ~/.config/local-worker/searxng/settings.yml with a generated secret. JSON output on, limiter off:
+# the instance is only reachable from this machine and is used by one local client.
+use_default_settings: true
+general:
+  instance_name: local-worker
+server:
+  secret_key: "__SECRET__"
+  limiter: false
+  image_proxy: false
+  public_instance: false
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json

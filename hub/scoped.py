@@ -31,6 +31,15 @@ def sensitive(path):
     return ('env' in name and fnmatch.fnmatch(name,'*.env*')) or name in {'.env','id_rsa','id_ed25519',
         '.credentials.json','credentials','credentials.json','api-token'} or name.endswith(('.pem','.key','.sqlite','.sqlite3','.db','.sql.gz','.dump'))
 
+def glob_match(path, pattern):
+    """Forgiving path glob: `**/` may match zero directories and a trailing slash means "everything below"."""
+    text = str(path)
+    if pattern.endswith('/'):
+        return text.startswith(pattern)
+    if fnmatch.fnmatch(text, pattern) or Path(text).match(pattern):
+        return True
+    return '**/' in pattern and fnmatch.fnmatch(text, pattern.replace('**/', ''))
+
 class ScopedFiles:
     def __init__(self, request, audit=lambda *a:None):
         self.request = request
@@ -134,16 +143,17 @@ class ScopedFiles:
     def glob_files(self, pattern: str='*') -> str:
         if self.request.role not in ('investigator','editor'): raise ScopeError('Discovery unavailable')
         if len(pattern)>300 or '..' in Path(pattern).parts: raise ScopeError('Invalid glob')
-        paths=[str(p) for p in self.inventory() if fnmatch.fnmatch(str(p),pattern) or p.match(pattern)]
+        paths=[str(p) for p in self.inventory() if glob_match(p,pattern)]
         self.audit('glob',{'pattern':pattern,'matches':len(paths)})
         return json.dumps({'paths':paths[:150],'truncated':len(paths)>150})
 
     def search_text(self, text: str, pattern: str='*') -> str:
+        """Find a literal string in files. `text` is the exact text to look for; `pattern` optionally limits which files, as a path glob such as 'hub/*.py' or 'src/'."""
         if self.request.role not in ('investigator','editor'): raise ScopeError('Search unavailable')
         if not text or len(text)>500: raise ScopeError('Use a bounded literal search')
         matches=[]
         for p in self.inventory():
-            if not (fnmatch.fnmatch(str(p),pattern) or p.match(pattern)): continue
+            if not glob_match(p,pattern): continue
             try:
                 target=self.path(str(p))
                 if target.stat().st_size>500000: continue
@@ -158,7 +168,9 @@ class ScopedFiles:
                              'evidence_id':f'E{len(self.evidence)+1}'})
         evidence_id=f'E{len(self.evidence)+1}'
         self.evidence.append({'id':evidence_id,'matches':matches})
-        return json.dumps({'evidence_id':evidence_id,'matches':matches,'truncated':len(matches)>=60})[:12000]
+        result={'evidence_id':evidence_id,'matches':matches,'truncated':len(matches)>=60}
+        if not matches:result['hint']="No matches. 'text' is the literal string to find and 'pattern' is a file path glob (for example 'hub/*.py' or 'src/'); check you did not swap them."
+        return json.dumps(result)[:12000]
 
     def write_file(self, path: str, content: str, expected_sha256: str | None=None) -> str:
         if self.request.role!='editor': raise ScopeError('Only Editor can edit')
@@ -244,15 +256,15 @@ async def public_url(url):
     return url
 
 class Research:
-    def __init__(self,audit,provider='exa',health_path=None,task='',plan_path=None):
-        self.searches=0;self.fetches=0;self.audit=audit;self.pages={};self.page_providers={};self.page_metadata={};self.provider=provider
+    def __init__(self,audit,provider='exa',health_path=None,task='',plan_path=None,ledger=None):
+        self.ledger=ledger;self.searches=0;self.fetches=0;self.audit=audit;self.pages={};self.page_providers={};self.page_metadata={};self.provider=provider
         self.health_path=health_path;self.exa_unavailable=False
         if health_path and health_path.exists():
             self.exa_unavailable=json.loads(health_path.read_text()).get('retry_after',0)>time.time()
         self.task=task;self.plan_path=plan_path;self.plan=None;self.plan_versions=0
 
     def plan_web_task(self, objective: str, needs_current_evidence: bool, requirements: list[WebRequirement], strategy: list[str], result_format: str, stop_when: str, revision_reason: str='') -> str:
-        """Before web research, interpret the ORIGINAL request and define your own evidence/acceptance checks and search breadth. Each task_quote must be copied from that request. Choose the strategy and output yourself; do not invent user requirements. The reviewer independently checks/revises this plan. This tool grants no new permissions or budget."""
+        """Before web research, interpret the ORIGINAL request and define your own evidence/acceptance checks and search breadth. Each requirement object needs exactly these keys: id, task_quote, requirement, acceptance. Each task_quote must be copied from that request. Choose the strategy and output yourself; do not invent user requirements. The reviewer independently checks/revises this plan. This tool grants no new permissions or budget."""
         if self.plan_versions>=2:raise ScopeError('Two research plan versions already recorded for this phase; use existing tools and report remaining gaps')
         if self.plan is not None and not revision_reason.strip():raise ScopeError('A plan revision needs a reason grounded in observed evidence or an omitted original requirement')
         if len(revision_reason)>1000:raise ScopeError('Plan revision reason is too long')
@@ -266,6 +278,19 @@ class Research:
         self.audit('web_research_plan',{**plan.model_dump(),'phase':self.plan_path.stem if self.plan_path else 'work',
                                       'revision':self.plan_versions,'revision_reason':revision_reason})
         return plan.model_dump_json()+'\nExecute this plan with the available scoped tools. Unknowns and contradictions must be reported; preserve useful verified findings.'
+
+    def _charge(self,kind):
+        if not self.ledger:return
+        from .ledger import BudgetExhausted
+        try:self.ledger.charge(kind)
+        except BudgetExhausted as error:raise ScopeError(str(error)) from None
+
+    def _reuse(self,url):
+        # A page another phase already read within the freshness window, with its original provenance.
+        if not self.ledger or url in self.pages:return
+        entry=self.ledger.load_page(url)
+        if entry:
+            self.pages[url]=(entry['text'],entry['observed_at']);self.page_providers[url]=entry['provider'];self.page_metadata[url]=entry['metadata']
 
     def require_plan(self):
         if self.task and self.plan is None:raise ScopeError('Call plan_web_task first to define requirements and evidence checks from the original request')
@@ -324,6 +349,7 @@ class Research:
         if len(objective)>1000:raise ScopeError('Search objective is too long')
         if any(s in (query+' '+objective).lower() for s in ['localhost','127.0.0.1','api_key=','password=','/home/','bearer ']):
             raise ScopeError('Query appears to contain private context')
+        self._charge('search')
         self.searches+=1
         from datetime import datetime, timezone
         from .web_provider import check_exa_response,ProviderUnavailable,langsearch_key
@@ -373,8 +399,10 @@ class Research:
         if start<0 or not 1<=characters<=8000 or len(find)>200 or mode not in ('current','cached'):
             raise ScopeError('fetch_web requires start >= 0, characters 1..8000 (default 6000), find <= 200 characters and mode current|cached. Use next_start or a short literal find for relevant content; do not request the entire page in one call.')
         from datetime import datetime, timezone
+        self._reuse(url)
         if url not in self.pages or (mode=='current' and not self.page_metadata.get(url,{}).get('origin_attempted')):
             if self.fetches>=5: raise ScopeError('Fetch budget exhausted; report available findings')
+            self._charge('fetch')
             self.fetches+=1
             metadata={'method':'hosted-extraction','requested_url':url,'current_eligible':False,'origin_attempted':mode=='current'}
             if mode=='current':
@@ -403,6 +431,7 @@ class Research:
                     self.page_providers[url]='exa-keyless'
                 metadata['method']=self.page_providers[url]
             self.page_metadata[url]=metadata
+            if self.ledger:self.ledger.store_page(url,self.pages[url][0],metadata,self.page_providers[url],self.pages[url][1])
         text,retrieved=self.pages[url]
         metadata={**self.page_metadata.get(url,{'method':self.page_providers[url],'current_eligible':False,'origin_attempted':False}),
                   'observed_at':retrieved,'requested_url':url}
@@ -431,12 +460,16 @@ class DraftEvidence:
         record=records[index];text=record['text'];end=min(len(text),start+characters)
         return json.dumps({k:v for k,v in record.items() if k!='text'},ensure_ascii=False)+'\n'+f'Characters {start}:{end} of {len(text)}; next_start: {end if end<len(text) else "none"}\n'+text[start:end]
 
-def create_tools(job_dir, phase=None):
+TOOL_GROUPS = ('files','evidence','edit','web','draft')
+
+def create_tools(job_dir, phase=None, groups=None):
+    """Register the role's tools for a phase. `groups` can only narrow what the role/phase already grants."""
     directory=Path(job_dir).resolve()
     request=JobRequest.model_validate_json((directory/'request.json').read_text())
     def audit(kind,data):
         with (directory/'tools.jsonl').open('a') as f: f.write(json.dumps({'time':time.time(),'phase':phase or 'work','kind':kind,'data':data})+'\n')
     files=ScopedFiles(request,audit)
+    allow=lambda group: groups is None or group in groups
     server=FastMCP('scoped')
     def guarded(fn):
         import functools
@@ -452,18 +485,24 @@ def create_tools(job_dir, phase=None):
                 except Exception as e: audit('tool_error',{'tool':fn.__name__,'error':str(e)[:500]});raise
         return wrapper
     if request.role in ('investigator','editor'):
-        for fn in (files.read_file,files.read_files,files.glob_files,files.search_text): server.add_tool(guarded(fn))
-        if request.evidence_job_ids or phase in ('review','diagnose','answer_review'):
+        if allow('files'):
+            for fn in (files.read_file,files.read_files,files.glob_files,files.search_text): server.add_tool(guarded(fn))
+        if allow('evidence') and (request.evidence_job_ids or phase in ('review','diagnose','answer_review')):
             from .evidence import EvidenceReader
             server.add_tool(guarded(EvidenceReader(directory,audit).read_check_output))
-    if request.role=='editor' and phase not in ('investigate','review','diagnose','answer_review'):
+    if allow('edit') and request.role=='editor' and phase not in ('investigate','review','diagnose','answer_review'):
         for fn in (files.edit_file,files.replace_lines,files.write_file): server.add_tool(guarded(fn))
-    if request.role in ('researcher','personal'):
+    if allow('web') and request.role in ('researcher','personal'):
         from .web_provider import selection
         plan_name='answer-review' if phase=='answer_review' else 'work'
-        research=Research(audit,selection(directory)['search_provider'],directory/'web-provider-health.json',request.task,directory/(plan_name+'.research-plan.json'))
-        for fn in (research.plan_web_task,research.search_web,research.fetch_web): server.add_tool(guarded(fn))
-    if phase=='answer_review':server.add_tool(guarded(DraftEvidence(directory).read_draft_evidence))
+        from .ledger import WebLedger
+        ledger=WebLedger.open(directory)
+        strict=request.verify or phase=='answer_review'
+        provider=selection(directory)['search_provider']
+        # The strict research tools speak Exa/LangSearch; a SearXNG setup keeps Exa for --verify.
+        research=Research(audit,'exa' if provider=='searxng' else provider,directory/'web-provider-health.json',request.task if strict else '',directory/(plan_name+'.research-plan.json'),ledger)
+        for fn in ((research.plan_web_task,) if strict else ())+(research.search_web,research.fetch_web): server.add_tool(guarded(fn))
+    if allow('draft') and phase=='answer_review':server.add_tool(guarded(DraftEvidence(directory).read_draft_evidence))
     return server
 
 def serve_tools(job_dir):

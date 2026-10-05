@@ -87,4 +87,49 @@ async def test_bounded_workflow_repairs_and_rechecks(repo,store,repairs,expected
     assert len(result['attempts'])==expected_attempts
     assert result['checks'][0]['exit_code']==0
     assert (repo/'app.ts').read_text()=='export const answer = 42;\n'
-    assert ('diagnose-1','diagnose') in calls if repairs==2 else all(kind!='diagnose' for _,kind in calls)
+    # Checks decide: no review or model diagnosis runs unless requested.
+    assert all(kind not in ('diagnose','review') for _,kind in calls)
+
+
+def implement_request(repo,**kw):
+    check=Check(name='answer',argv=[sys.executable,'-c',"from pathlib import Path; assert '42' in Path('app.ts').read_text()"])
+    return JobRequest(role='editor',workflow='implement',repo=str(repo),task='Set answer to 42',allowed_paths=['app.ts'],checks=[check],timeout=60,
+                      idempotency_key=kw.pop('key'),**kw)
+
+def scripted(repo,calls,edit_value='42',editor_status='COMPLETE',review_status='PARTIAL'):
+    async def fake_model(_job,_request,_directory,label,prompt,**kwargs):
+        calls.append((label,kwargs.get('phase'),prompt))
+        if label in ('edit',) or label.startswith('repair-'):
+            if edit_value:(repo/'app.ts').write_text('export const answer = '+edit_value+';\n')
+            return {'info':{'tokens':{}}},report(editor_status,'Edited.')
+        return {'info':{'tokens':{}}},report(review_status,'The review dislikes the style.')
+    return fake_model
+
+@pytest.mark.asyncio
+async def test_passing_checks_are_complete_even_if_the_editor_hedged(repo,store):
+    job=store.submit(implement_request(repo,key='hedge'));calls=[];runner=Runner(store,'token');runner.execute_model=scripted(repo,calls,editor_status='PARTIAL')
+    await runner.run(store.next());result=store.get(job['id'])['result']
+    assert result['worker_status']=='COMPLETE' and [c[0] for c in calls]==['edit'] and result['attempts'][0]['review_status']=='skipped'
+
+@pytest.mark.asyncio
+async def test_requested_review_is_advisory_and_cannot_downgrade_passing_checks(repo,store):
+    job=store.submit(implement_request(repo,key='advisory',review_pass=True));calls=[];runner=Runner(store,'token');runner.execute_model=scripted(repo,calls,review_status='PARTIAL')
+    await runner.run(store.next());result=store.get(job['id'])['result']
+    assert [c[0] for c in calls]==['edit','review-0'] and result['worker_status']=='COMPLETE'
+    assert 'Local review (advisory): The review dislikes the style.' in result['report']
+
+@pytest.mark.asyncio
+async def test_failed_checks_repair_from_check_output_not_review_and_end_partial(repo,store):
+    job=store.submit(implement_request(repo,key='fail',repair_attempts=1,review_pass=True));calls=[];runner=Runner(store,'token');runner.execute_model=scripted(repo,calls,edit_value='43',review_status='COMPLETE')
+    await runner.run(store.next());result=store.get(job['id'])['result']
+    labels=[c[0] for c in calls]
+    assert labels==['edit','review-0','repair-1','review-1']
+    assert 'The approved checks failed' in calls[2][2] and 'The review dislikes' not in calls[2][2]
+    assert result['worker_status']=='PARTIAL' and 'Checks failed: answer' in result['report'] and result['checks_failed']
+
+@pytest.mark.asyncio
+async def test_no_authorized_change_is_never_complete(repo,store):
+    (repo/'app.ts').write_text('export const answer = 42;\n')
+    job=store.submit(implement_request(repo,key='nochange'));calls=[];runner=Runner(store,'token');runner.execute_model=scripted(repo,calls,edit_value=None)
+    await runner.run(store.next());result=store.get(job['id'])['result']
+    assert result['worker_status']=='PARTIAL' and 'No authorized file change was made' in result['report']

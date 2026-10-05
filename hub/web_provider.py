@@ -1,5 +1,6 @@
 """Selectable public search; credentials stay outside prompts and job snapshots."""
 import json
+import re
 import os
 import stat
 from pathlib import Path
@@ -24,9 +25,20 @@ def selection(directory=None):
     path=Path(directory)/'web-config.json' if directory is not None else CONFIG/'web.json'
     if directory is not None and not path.exists():path=CONFIG/'web.json'
     value=json.loads(path.read_text()) if path.exists() else {'search_provider':'exa'}
-    if set(value)!={'search_provider'} or value['search_provider'] not in ('exa','langsearch'):
-        raise ValueError('web.json must contain only search_provider: exa or langsearch')
+    if not set(value)<={'search_provider','searxng_url'} or value.get('search_provider') not in ('exa','langsearch','searxng'):
+        raise ValueError('web.json must contain search_provider (exa, langsearch or searxng) and optionally searxng_url')
+    if 'searxng_url' in value and not re.fullmatch(r'http://(127\.0\.0\.1|localhost):\d{2,5}/?',str(value['searxng_url'])):
+        raise ValueError('searxng_url must be a local http://127.0.0.1:PORT address')
     return value
+
+
+def searxng_health(url):
+    """True when the local SearXNG answers JSON searches."""
+    try:
+        response=httpx.get(url.rstrip('/')+'/search',params={'q':'weather','format':'json'},timeout=10,trust_env=False)
+        return response.status_code==200 and isinstance(response.json().get('results'),list)
+    except (httpx.HTTPError,ValueError):
+        return False
 
 
 def langsearch_key():
@@ -43,14 +55,16 @@ def langsearch_key():
     except FileNotFoundError:raise ValueError('LangSearch needs a free API key; run local-worker web configure langsearch') from None
 
 
-def configure(provider):
-    if provider not in ('exa','langsearch'):raise ValueError('Unknown public search provider')
+def configure(provider,searxng_url='http://127.0.0.1:8888'):
+    if provider not in ('exa','langsearch','searxng'):raise ValueError('Unknown public search provider')
     if provider=='langsearch':langsearch_key() # Do not activate a broken provider.
+    if provider=='searxng' and not searxng_health(searxng_url):
+        raise ValueError('SearXNG is not answering JSON searches at '+searxng_url+'; run local-worker web setup-searxng')
     CONFIG.mkdir(mode=0o700,parents=True,exist_ok=True)
     target=CONFIG/'web.json'
     temporary=CONFIG/'web.json.tmp'
     fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
-    with os.fdopen(fd,'w') as out:json.dump({'search_provider':provider},out)
+    with os.fdopen(fd,'w') as out:json.dump({'search_provider':provider,**({'searxng_url':searxng_url} if provider=='searxng' else {})},out)
     temporary.chmod(0o600);temporary.replace(target)
     return selection()
 

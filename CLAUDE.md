@@ -36,8 +36,20 @@ files. After two unsuccessful local attempts, take over.
 
 ## Boundaries to preserve
 
-- Default model is Qwen3.5 9B, 16K context and concurrency one. 32K is opt-in;
-  do not promote experimental settings without measured evaluation.
+- Default model is Gemma 4 12B (`gemma4:12b-it-qat`), chosen without a head-to-head
+  comparison against Qwen3.5 9B; compare before relying on it. 16K context and concurrency
+  one; 32K is opt-in. Only one model is resident at a time (`OLLAMA_MAX_LOADED_MODELS=1`);
+  model names live in `hub/model_registry.py`. Do not promote experimental settings without
+  measured evaluation.
+- Default paths are host-driven pipelines without tool calling (docs/WORKFLOWS.md): ask
+  (decide -> search/read -> answer from numbered excerpts, host-written sources), investigate
+  (repo map + search hits -> chosen ranges -> answer) and edit (files in prompt -> SEARCH/REPLACE
+  blocks applied through ScopedFiles). Keep host-written citations, the unit/time normalizer and
+  the scoped write guards. `--verify`, `--review` and `--agent-loop` keep the older tool loop.
+  Coding: passing approved checks decide; the local review is opt-in and advisory.
+- `--board` is opt-in and rarely useful (see docs/WORKFLOWS.md). Proposers are tools-off and
+  never see each other; no phase combines repository and web access. Preserve the literal
+  task-quote anchors, host-computed drift report and shared web ledger. No critic or repair.
 - Investigator reads are scoped. Editor writes require exact authorized paths
   and fresh observed source. Preserve symlink, hardlink and secret-file guards.
 - Validator executes only explicitly approved argv checks. It uses zero model

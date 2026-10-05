@@ -86,7 +86,7 @@ def test_reviewed_synthesis_is_generic_and_missing_source_does_not_erase_verifie
 async def test_model_plan_decides_freshness_and_tools_unlock_without_domain_keyword_rules(tmp_path,monkeypatch,current):
     directory=tmp_path/'job';directory.mkdir()
     task='Explain this source: https://docs.example/change'
-    request=JobRequest(role='personal',task=task,idempotency_key='plan')
+    request=JobRequest(role='personal',task=task,idempotency_key='plan',verify=True)
     (directory/'request.json').write_text(request.model_dump_json())
     monkeypatch.setattr('hub.scoped.public_url',AsyncMock(side_effect=lambda u:u))
     from hub import public_page

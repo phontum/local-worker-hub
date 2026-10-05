@@ -146,7 +146,7 @@ def test_dashboard_summary_keeps_verification_artifact_and_bounds_issues():
 @pytest.mark.asyncio
 async def test_engine_cannot_finish_current_answer_from_search_only(tmp_path,monkeypatch):
     directory=tmp_path/'job';directory.mkdir()
-    request=JobRequest(role='personal',task='Find cheapest available card in stock',idempotency_key='guard')
+    request=JobRequest(role='personal',task='Find cheapest available card in stock',idempotency_key='guard',verify=True)
     (directory/'request.json').write_text(request.model_dump_json())
     class Tools:
         async def list_tools(self):return [SimpleNamespace(name='search_web',description='',inputSchema={'type':'object','properties':{}})]

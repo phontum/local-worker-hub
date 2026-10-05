@@ -1,5 +1,5 @@
 from typing import Literal
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pathlib import Path
 import re
 
@@ -16,6 +16,14 @@ class Check(BaseModel):
     depends_on: list[str] = Field(default_factory=list, max_length=12)
     requires_test_database: bool = False
     guard_next_dev: bool = False
+
+def default_timeout(role, preset=None, board=False, verify=False, review=False):
+    """Model-time budget when the caller gives none: plain public lookups are quick, everything else keeps 300s."""
+    if preset == 'small':
+        return 120
+    if role in ('personal', 'researcher') and not (board or verify or review or preset == 'extended'):
+        return 120
+    return 300
 
 class JobRequest(BaseModel):
     role: Role = 'investigator'
@@ -46,11 +54,23 @@ class JobRequest(BaseModel):
     profile_ref: str | None = Field(default=None, pattern=r'^[a-f0-9]{12}$')
     check_groups: list[str] = Field(default_factory=list, max_length=12)
     parameters: dict[str, str] = Field(default_factory=dict, max_length=20)
+    board: bool = False
+    board_mode: Literal['full', 'lite'] | None = None
+    verify: bool = False
+    agent_loop: bool = False
 
     @model_validator(mode='after')
     def boundaries(self):
         if self.execution_preset == 'small' and 'timeout' not in self.model_fields_set:
             self.timeout = 120
+        if self.board and 'timeout' not in self.model_fields_set:
+            self.timeout = 300
+        if self.verify and self.role not in ('personal', 'researcher'): raise ValueError('verify applies to public web roles only')
+        if self.board_mode and not self.board: raise ValueError('board_mode requires board')
+        if self.board:
+            if self.role not in ('personal', 'researcher'): raise ValueError('Board deliberation is available for public web roles only in this version')
+            if self.execution_preset in ('small', 'extended') or self.model_context == 32768:
+                raise ValueError('Board phases use fixed 16K contexts; omit small/extended presets and 32K context')
         if not self.task.strip(): raise ValueError('Task is empty')
         if self.role not in ('researcher', 'personal'):
             if not self.repo: raise ValueError('This role requires an explicit repository')
@@ -112,7 +132,10 @@ class JobRequest(BaseModel):
         # remains deterministic, including when extended context was requested.
         if self.workflow == 'implement' or (self.role == 'validator' and self.summary_mode == 'none' and not self.source_job_id):
             return False
-        return self.review_pass if self.review_pass is not None else self.execution_preset == 'extended'
+        if self.review_pass is not None:
+            return self.review_pass
+        # Extended means more context and thinking; for public questions it no longer implies the strict reviewer.
+        return self.execution_preset == 'extended' and (self.verify or self.role not in ('personal', 'researcher'))
 
 class EvidenceReference(BaseModel):
     source: str = Field(min_length=1, max_length=30)
@@ -170,3 +193,64 @@ class Review(BaseModel):
     measurement_source: Literal['measured', 'manual_estimate'] = 'measured'
     task_outcome: Literal['completed', 'partial', 'blocked'] | None = None
     review_effort_seconds: int | None = Field(default=None, ge=0)
+
+
+class BoardModel(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+class BoardRequirement(BoardModel):
+    id: str = Field(min_length=1, max_length=30)
+    kind: Literal['explicit', 'derived']
+    task_quote: str = Field(min_length=1, max_length=2000, description='Copied EXACTLY from the task')
+    requirement: str = Field(min_length=1, max_length=1000)
+    acceptance: str = Field(min_length=1, max_length=1500)
+
+class BoardAssumption(BoardModel):
+    text: str = Field(min_length=1, max_length=600)
+    risk_if_wrong: str = Field(max_length=600)
+    how_to_check: str = Field(max_length=600)
+
+class BoardPlanStep(BoardModel):
+    step: str = Field(min_length=1, max_length=600)
+    requirement_ids: list[str] = Field(max_length=10)
+
+class BoardProposal(BoardModel):
+    """An independent proposal. There is deliberately no field for facts: only hypotheses to verify."""
+    requirements: list[BoardRequirement] = Field(min_length=1, max_length=12)
+    assumptions: list[BoardAssumption] = Field(max_length=8)
+    plan: list[BoardPlanStep] = Field(min_length=1, max_length=10)
+    risks: list[str] = Field(max_length=8)
+    hypotheses_to_verify: list[str] = Field(max_length=8)
+    open_questions: list[str] = Field(max_length=6)
+    rationale: str = Field(max_length=600)
+
+class BoardTriage(BoardModel):
+    skip_board: bool
+    needs_external_info: bool
+    ambiguity: Literal['low', 'medium', 'high']
+    scout_query: str = Field(default='', max_length=200, description='Short neutral public search query, or empty')
+
+class SynthRequirement(BoardRequirement):
+    supported_by: list[Literal['A', 'B', 'C', 'D']] = Field(max_length=4)
+
+class BoardDecision(BoardModel):
+    topic: str = Field(min_length=1, max_length=300)
+    chosen: str = Field(min_length=1, max_length=600)
+    basis: Literal['requirement', 'evidence', 'reasoning']
+
+class BoardDissent(BoardModel):
+    candidate: Literal['A', 'B', 'C', 'D']
+    point: str = Field(min_length=1, max_length=600)
+    why_not_adopted: str = Field(min_length=1, max_length=600)
+
+class BoardSynthesis(BoardModel):
+    objective: str = Field(min_length=1, max_length=1500)
+    requirements: list[SynthRequirement] = Field(min_length=1, max_length=15)
+    decisions: list[BoardDecision] = Field(max_length=10)
+    dissent: list[BoardDissent] = Field(max_length=6)
+    plan: list[str] = Field(min_length=1, max_length=8)
+    result_format: str = Field(min_length=1, max_length=1000)
+    stop_when: str = Field(min_length=1, max_length=1000)
+    needs_web: bool
+    needs_current_evidence: bool
+    open_questions: list[str] = Field(max_length=6)

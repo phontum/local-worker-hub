@@ -172,3 +172,175 @@ are not evidence of frontier-token or dollar savings.
 Private job receipts, local usage and final decisions are recorded under
 `~/.local/state/opencode/local-worker/benchmarks/web-research-plans-20261003/evaluation.json`.
 The usual 16K model preset, concurrency one and optional extended mode remain.
+
+## Board Phase 0 probe — 2026-10-03
+
+`benchmarks/probe_models.py` calls native Ollama directly (one model resident, 16K context) with
+schema-constrained proposer, arbiter and triage prompts on 10 tasks (7 for proposals/arbiter).
+Single run per setting, seed 7, so these are measurements for design decisions, not accuracy claims.
+"Gold recall" is mechanical: the share of key task phrases that a valid verbatim `task_quote` overlaps.
+Private raw results: `~/.local/state/opencode/local-worker/benchmarks/board-probe-20261003-*/results.json`.
+
+| Setting | Model | JSON valid | Anchors valid | Gold recall | Median |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Proposals, thinking on (4096 tokens) | qwen3.5:9b | 9/14 | 18/18 | 0.60 | 42.8s |
+| Proposals, thinking on (4096 tokens) | gemma4:12b-it-qat | 12/14 | 40/40 | 0.87 | 26.6s |
+| Proposals, thinking off (2048 tokens) | qwen3.5:9b | 14/14 | 42/43 | 0.92 | 11.4s |
+| Proposals, thinking off (2048 tokens) | gemma4:12b-it-qat | 14/14 | 45/45 | 0.98 | 12.7s |
+| Arbiter, thinking on | qwen3.5:9b | 0/7 | - | - | ~45s |
+| Arbiter, thinking on | gemma4:12b-it-qat | 5/7 | 18/18 | 0.70 | ~50s |
+| Arbiter, thinking off | qwen3.5:9b | 7/7 | 35/35 | 1.00 | 14.9s |
+| Arbiter, thinking off | gemma4:12b-it-qat | 7/7 | 22/22 | 1.00 | 9.9s |
+
+- Every invalid output had `done_reason=length`: thinking plus JSON in one call exhausted the token cap. This is a
+  budget/pattern limit, not a structured-output incapability. The thinking-on Qwen arbiter result (0/7) reflects
+  the cap and must not be read as arbiter quality.
+- Residency: Qwen 5.76 GB and Gemma 7.67 GB, both 100% on GPU at 16K when loaded alone. Swap-in load times were
+  8-17s (varied between runs; the first load also includes disk reads).
+- Arbiter adoption was balanced (Qwen arbiter 47 own / 42 Gemma; Gemma arbiter 43 Qwen / 44 own); no
+  self-preference showed at this sample size. Neither arbiter dropped an anchored requirement with thinking off.
+- Triage: Qwen 10/10, Gemma 9/10 (Gemma skipped the stable-knowledge question that explicitly forbade web search).
+- Qwen emitted 11 derived requirements versus Gemma's 2 across 14 proposals; whether those are useful or
+  over-constraining is untested.
+- Not measured: proposal usefulness, the full board end to end, thinking with a larger budget or a separate
+  format turn, and Gemma's tool calling.
+
+## Board live smoke — 2026-10-04
+
+Three live runs of `local-worker --board "Find the cheapest RTX 5070 in Novi Sad today. It should be in stock."`
+(Gemma default, lite mode). These are integration findings from single runs, not a quality evaluation.
+
+1. **Ollama killed by the Linux OOM killer** mid-repair. WSL has about 7.6 GB RAM. llama.cpp keeps its prompt cache in
+   host RAM (default limit 8 GB) and it grows with every distinct prompt prefix: llama-server RSS rose from 1.4 GB to
+   3.5 GB after four long prompts on Gemma (about 560 MB per prompt; 4.9 GB after six) and from 1.25 GB to 2.2 GB on
+   Qwen. A throwaway Ollama on another port confirmed `LLAMA_ARG_CACHE_RAM=512` is honoured: RSS stayed flat at about
+   1.8 GB over six prompts. The Ollama service override still needs that variable (requires sudo). The hub now unloads
+   models when available RAM falls below 2500 MB (`memory-guard` events) and reports a dropped Ollama connection as a
+   retryable 502. `local-worker doctor` shows host memory and whether the cache limit is configured.
+2. **`plan_web_task` failed for Gemma in every phase** because it omitted the required `requirement` key and copied
+   `kind` from the board briefing's layout; the engine then withheld all other web tools, so the critic reported
+   BLOCKED. The briefing layout is now prose, the tool description names the required keys, and the final JSON turn
+   asks for short `web_claims` quotes (one repair executor produced 8,221 characters of pasted page text and hit
+   the 4096-token cap).
+3. **Completed, 470s, PARTIAL.** Triage, proposals, arbiter (4 anchored requirements, no drift flags), seeded plan,
+   executor, critic, a provenance-triggered repair and a second critic all ran, with one model swap and four
+   memory-guard unloads. Nothing was verified: one retailer origin read succeeded, another returned HTTP 403, and the
+   models cited retailer pages they had only seen in search results (6 searches, 2 fetches). The guard correctly
+   refused to present unverified price or stock as current. The repair did not improve the outcome.
+
+Whether the board beats the normal reviewed flow is not established; run `benchmarks/run_board.py` with repeats and
+frontier grading before drawing conclusions. The Qwen-vs-Gemma default comparison is also still pending.
+
+## Board pilot — 2026-10-04 (time-boxed to ~22 minutes, stopped early)
+
+`benchmarks/run_board.py --arms review board-lite`, one repeat, Gemma default. Only five jobs finished before the
+cap; the planned docs, trick and no-web tasks never ran, so there is no unnecessary-web measurement and no
+`review-matched` arm. One sample per cell: anecdotes, not evidence. No frontier acceptance was recorded.
+
+| Task | Arm | Wall time | Status | Searches / fetches | Verified origin observations |
+| --- | --- | ---: | --- | ---: | ---: |
+| RTX 5070, Novi Sad | review | 121s | PARTIAL | 3 / 2 | 0 |
+| RTX 5070, Novi Sad | board-lite | 327s | PARTIAL (repaired) | 4 / 5 | 0 |
+| 2 TB NVMe SSD | review | 113s | PARTIAL | 3 / 1 | 0 |
+| 2 TB NVMe SSD | board-lite | 491s | PARTIAL (repaired) | 6 / 1 | 7 |
+| RTX 5070 Ti variant | review | 171s | PARTIAL | 2 / 3 | 1 |
+
+Every run ended PARTIAL, and the board took 3-4x longer. The one board run with verified observations (SSD) named
+a product with origin-verified price and stock quotes, yet its prose still called it "cheapest" while the critic's own
+checklist marked lowest-price and delivery as unknown; the unverified items were listed in Risks. The board drift
+check never flagged anything (0 flags in both board runs). Treat the board as unproven until a larger, frontier-graded
+comparison exists. Long benchmarks are out of scope for this tool; keep any future run under ~30 minutes.
+
+## Gemma 4 12B vs Qwen3.5 9B on the delegation fixtures — 2026-10-04
+
+`benchmarks/run_delegation.py --presets work` (16K, one run per cell, about 5 minutes per model; Qwen selected through
+temporary per-phase `model` entries in roles.json, restored afterwards; effective-config events confirmed each model).
+Single samples on four tiny fixtures: indicative only, not a reliability measurement.
+
+| Case | Gemma | Qwen |
+| --- | --- | --- |
+| Discovery (investigator) | 7s, PARTIAL, 283 tokens | 23s, PARTIAL, 582 tokens |
+| Settings/view edit slice (editor, 1 repair allowed) | 72s, PARTIAL, 3,758 tokens | 195s, PARTIAL, 15,607 tokens |
+| Backend None-handling fix (editor) | 32s, COMPLETE, mechanically correct | 18s, COMPLETE, mechanically correct |
+| Log diagnosis (investigator) | 11s, PARTIAL | 5s, COMPLETE, mechanically correct |
+
+- Mechanically correct: Gemma 1/4, Qwen 2/4. Neither passed the two-file edit slice.
+- Both discovery answers contained the right value (10). The PARTIAL on Gemma's two investigator runs (and Qwen's
+  discovery) came from the host's evidence check: the report cited no `E<n>` evidence IDs, so it was downgraded
+  ("Unverified or missing requested source evidence"). Qwen cited E1 in log diagnosis; Gemma cited none in either.
+- Gemma used far fewer tokens and less time on the editing slice but its own risk note admitted the `String()`
+  rendering does not escape HTML; Qwen's attempt also failed the behaviour check.
+- No frontier review of the diffs was recorded. Web research, the board, 32K context and larger fixtures were not compared.
+
+Reading: no clear winner. Gemma is faster and cheaper on the edit slice; Qwen follows the evidence-citation contract
+more reliably in the investigator role.
+
+## Simplification pass — 2026-10-04
+
+Changes under test: plain best-effort answers for Personal/Researcher (no automatic review or origin-proof; `--verify`
+opts in), metric/24-hour preferences, checks-decide coding flow with advisory review, investigators judged on files
+actually read instead of `E<n>` citations, forgiving globs with a corrective hint on empty searches, cheaper board.
+Single live runs, Gemma default, indicative only.
+
+Personal (end to end, CLI): weather for a time window 15s, 25s, 11s; price lookup (RTX 5070, Serbia) 12s with a
+sourced list; docs question 2s; rain tomorrow 15s. Answers were plain text in °C, km/h, 24-hour time with a source and
+a local "as of" time. Defects found and fixed while testing: a first price answer claimed from memory that the
+RTX 5070 was unreleased (prompt now requires searching anything that changes over time), UTC "as of" times, a Serbian
+reply to an English question, and markdown asterisks. Correctness of the figures was not independently checked
+beyond the cited pages.
+
+Coding (`run_delegation.py --presets work`, about 2 minutes total):
+
+| Case | Before (Gemma) | After (Gemma) |
+| --- | --- | --- |
+| Discovery | 7s, PARTIAL | 7s, COMPLETE, correct |
+| Settings/view edit slice | 72s, PARTIAL | 75s, PARTIAL; the check found user text still reached the HTML and one repair did not fix it |
+| Backend None-handling fix | 32s, COMPLETE | 42s, COMPLETE, correct |
+| Log diagnosis | 11s, PARTIAL | 7s, COMPLETE, correct |
+
+Mechanically correct 3/4 versus 1/4 before; the two cases that changed were downgraded for missing `E<n>` citations,
+not for wrong answers. The edit slice remains a real model failure, correctly reported. Note that
+`~/.config/local-worker/roles.json` still sets `editor.thinking: true`, which overrides the new thinking-off default.
+Background delegation: `local-worker delegate --read-only ...` returned one compact JSON brief in 17s (the model
+searched with swapped `text`/`pattern` arguments and missed the target; tool hints were added afterwards, not re-measured).
+
+## Plain-mode tool use, Gemma vs Qwen — 2026-10-04
+
+Three runs each of two time-sensitive personal questions on the plain flow (no review). Qwen was selected with a
+temporary `personal.model` entry in roles.json, restored afterwards (six earlier runs were cancelled because the
+profile is read at job start, not at submission).
+
+| Question | Gemma 4 12B | Qwen3.5 9B |
+| --- | --- | --- |
+| Cheapest in-stock RTX 5070 in Serbia | 0/3 searched; all three said the card is unreleased | 2/3 searched (107,018 RSD from a snippet, unverified); 1/3 said unreleased |
+| Current weather in Moscow (Russian) | 3/3 searched, 0 fetched; 2/3 repeated a stale +4°C cached snippet and relabelled 0.9 m/s as km/h | 0/3 searched; all three invented a temperature (+16, +10, +12°C) and a Yandex source line with a time |
+
+Earlier user runs showed the same patterns: an hourly °F table turned into a wrong °C evening value (63°F, 17°C,
+reported as 11°C), and `--extended` still routed through the strict reviewer, ending PARTIAL with a likely-correct answer.
+Reading: both models skip the search tool unpredictably and will fabricate a cited answer when they do; neither should
+be left to decide alone whether to look things up, convert units or write source lines.
+
+## v3 host-driven pipelines — 2026-10-04
+
+`benchmarks/eval_small.py` (12 personal questions, 6 repository lookups, 4 delegation fixtures), one run each, about
+5-10 minutes per model. Current-fact answers were graded by hand from the saved sources. Indicative only.
+
+| | Baseline (tool loop, Gemma) | v3 Gemma | v3 Qwen |
+| --- | --- | --- | --- |
+| Personal: used the web when needed | 11/12 | 12/12 | 12/12 |
+| Personal: links not actually fetched | 2 | 0 | 0 |
+| Personal: median time | 2.1s | 5.1s | 2.6s |
+| Current facts correct (Moscow now, latest Python, Tokyo time) | 0/3 (stale +4°C, 3.13.0 from 2024, 19:47) | 3/3 (+11°C, 3.14.8, 21:16) | 1/3 (Python said 3.13, Tokyo not searched and wrong) |
+| Repository lookups (path and value) | 6/6 | 6/6 | 6/6 (timing invalid: answer step stayed on Gemma) |
+| Delegation fixtures | 3/4 in 154s | 4/4 in 18s (after the thinking fix) | 3/4 in 59s |
+
+- The first v3 fixture run failed 2/4 at about 279s each: the role profile's `editor.thinking: true` let Gemma spend the
+  whole 4,096-token output on reasoning and write no edit blocks. Edits now think only with `--model-thinking on`.
+  The settings/view slice passed for the first time; both diffs were checked by hand.
+- Remaining weaknesses: weather answers can still misread a page (an evening value read as 14°C), and "cheapest"
+  claims cover only the shops whose pages could be read (several Serbian shops need JavaScript). The routing step
+  initially used dates in queries (pulling monthly pages) and replied in Serbian to an English question; both
+  prompt fixes were confirmed on a recheck.
+- Decision: Gemma 4 12B stays the default for every step (better answers and edits; a single model avoids swaps).
+  Qwen remains selectable per phase in roles.json.
+- SearXNG (self-hosted, Docker) answered every query, but only via Google CSE; Brave and DuckDuckGo refused the instance.

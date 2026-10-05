@@ -13,8 +13,10 @@ Public search uses a hosted provider; inference and repository tools run locally
 - Investigator, Editor, Validator, Researcher and Personal roles with separate
   tool permissions. Editors change only explicitly authorized files.
 - Deterministic validation with recorded exit codes and zero model tokens by
-  default. Implementation combines edits, checks, fresh review and one bounded repair.
-- Personal questions from any directory: `local-worker "Hey! What's the weather today in Budapest?"`
+  default. Implementation combines edits, approved checks and one bounded repair; passing checks decide the outcome, and a local review runs only with `--review` and only advises.
+- Personal questions from any directory, answered in plain language in about 10-20 seconds: the host decides whether to search, searches (self-hosted SearXNG, falling back to Exa), reads the best pages live and lets the model answer from numbered excerpts. Sources are added by the host from pages actually read, and units follow `~/.config/local-worker/preferences.json` (metric, 24-hour clock, your timezone): `local-worker "Will it rain in Budapest tomorrow afternoon?"`. Add `--verify` for strict origin-proof research (slower, may end PARTIAL).
+- Coding helpers without fragile tool calls: investigators get a repository map and search hits and pick what to read; editors get the files and reply with SEARCH/REPLACE blocks that the host applies under the same path and freshness guards. `--agent-loop` keeps the older tool loop for comparison.
+- Background use by Claude/Codex: `local-worker delegate ...` prints one compact brief when finished; `local-worker watch JOB_ID` prints one line per phase.
 - Optional extended mode: 32K context, thinking and an independent requirements
   review. The normal personal preset uses 16K.
 - A paired localhost dashboard with task history, research plans, local-model
@@ -31,10 +33,15 @@ net frontier-token and financial savings have not been established.
   native Windows service installation is not provided.
 - Python 3.11+, [uv](https://docs.astral.sh/uv/) and Node.js 20.19+ with npm.
 - [Ollama](https://ollama.com/) listening at `127.0.0.1:11434` with
-  `qwen3.5:9b` downloaded. Hardware must fit the model and context; GPU
-  telemetry is optional and depends on available system tools.
+  `gemma4:12b-it-qat` (default, 7.2 GB) and `qwen3.5:9b` downloaded; the board uses both,
+  one at a time. Hardware must fit the model and context; GPU telemetry is optional
+  and depends on available system tools.
 - Internet access for dependencies and public web questions. Repository-only
   tasks can run offline after dependencies and the model are installed.
+
+On a host with about 8 GB of RAM (for example a default WSL2 VM), set `LLAMA_ARG_CACHE_RAM=512` in the
+Ollama service environment: llama.cpp's prompt cache lives in host RAM and otherwise grows until the OOM killer
+stops Ollama. `local-worker doctor` reports whether it is configured.
 
 Keep inference concurrency at one and use 16K until measurements justify
 larger contexts. Extended mode increases memory use and does not guarantee better answers.
@@ -48,6 +55,7 @@ that checkout. Standalone wheel deployment is not the documented installation.
 git clone https://github.com/phontum/local-worker-hub.git
 cd local-worker-hub
 uv sync --frozen
+ollama pull gemma4:12b-it-qat
 ollama pull qwen3.5:9b
 npm --prefix frontend ci
 npm --prefix frontend run build
@@ -79,11 +87,20 @@ migration path requiring an existing private backup; it is not a fresh installer
 
 ## Use it
 
+Optional, recommended: `local-worker web setup-searxng` starts a private SearXNG search container (Docker) on 127.0.0.1:8888 and selects it.
+
+
 ```sh
 # Personal: general questions and public search, no repository access.
 local-worker "Find the official Python documentation for itertools.batched."
 local-worker --extended "Compare these public sources and cite your evidence."
 local-worker --review "Answer and check every requirement using 16K context."
+local-worker --verify "Is the RTX 5070 in stock at gigatron.rs right now?"   # strict proof, slower
+local-worker --board "..."   # rarely useful: slower multi-model deliberation
+
+# Background helper for a frontier agent: run in the background, continue working, read the brief on exit.
+local-worker delegate --read-only "Find where the retry timeout is set; return path:line evidence."
+local-worker watch JOB_ID   # optional: one line per phase change, then DONE <state> <status>
 
 # Run engineering commands from the intended repository root.
 local-worker --role investigator --read-path src --preset work \

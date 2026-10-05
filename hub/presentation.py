@@ -12,7 +12,7 @@ def size(value):
 def bounded(value, budget):
     # Drop only optional narrative. Never drop check outcomes or fabricate success.
     value['truncated'] = False
-    for key in ('report','notes','error','changed_files','recent_events'):
+    for key in ('ask','answer','report','notes','error','changed_files','recent_events'):
         while size(value) > budget and value.get(key):
             value['truncated'] = True
             v = value[key]
@@ -32,6 +32,18 @@ def bounded(value, budget):
     return value
 
 
+def board_artifacts(board):
+    if not board or board.get('state')=='skipped':return []
+    names=['board-state.json']
+    if (board.get('scout') or {}).get('query'):names.append('board-scout.json')
+    for item in board.get('phases',[]):
+        if not item.get('ok'):continue
+        if item['phase']=='triage':names.append('board-triage.json')
+        elif item['phase'].startswith('proposal-'):names.append('board-'+item['phase']+'.json')
+        elif item['phase']=='arbiter':names+=['board-synthesis.json','board-drift.json','board-identities.json']
+    return names
+
+
 def result_summary(job):
     r = job.get('result')
     if r is None: return {'ready':False, 'id':job['id']}
@@ -45,13 +57,17 @@ def result_summary(job):
     if web:refs.append(web['artifact'])
     plans=[name for name in r.get('research_plans',[]) if name in ('work.research-plan.json','answer-review.research-plan.json')]
     refs+=plans
+    refs+=board_artifacts(r.get('board'))
+    if r.get('ask'):refs.append('ask.json')
     refs += [c['artifact'] for c in checks if c.get('artifact')]
     refs += [c['artifact'] for attempt in r.get('attempts',[]) for c in attempt.get('checks',[]) if c.get('artifact')]
     value = {k:r.get(k) for k in ('report','worker_status','report_valid','usage','model','workspace_verified','repo','error','metrics','report_origin','source_job_id','completion')}
     value.update(id=job['id'], ready=True, state=job['state'], checks=checks, checks_failed=any(failed(c) for c in checks),
                  changed_files=r.get('changed_files',[])[:20], changed_file_count=len(r.get('changed_files',[])),
                  review=job.get('review'), attempts=r.get('attempts',[])[:3], workflow=r.get('workflow'),
-                 answer_review=r.get('answer_review'), artifacts=refs, full_result=f"/api/jobs/{job['id']}/result?view=full")
+                 answer_review=r.get('answer_review'), board=r.get('board'), ask=r.get('ask'), artifacts=refs, full_result=f"/api/jobs/{job['id']}/result?view=full")
+    parsed=parse_report(r.get('report') or '')
+    if parsed:value['answer']=parsed['findings'][:3000]
     if value.get('metrics'):
         value['metrics']=dict(value['metrics'],takeover=bool(job.get('review') and job['review']['decision']=='takeover'))
     if web:value['web_verification']={**web,'issues':[issue[:200] for issue in web.get('issues',[])[:3]]}
@@ -72,6 +88,8 @@ def result_brief(job):
                       'artifact':c.get('artifact'),'reason':c.get('reason')}
                      for c in result.get('checks',[])],
            'attempts':len(result.get('attempts',[])),
+           'board':{'state':board.get('state'),'mode':board.get('mode'),'degraded':board.get('degraded'),'drift_flags':board.get('drift_flags'),
+                    } if (board:=result.get('board')) else None,
            'requirements_review':{k:(result.get('answer_review') or {}).get(k) for k in ('state','status','initial_status')} if result.get('answer_review') else None,
            'next_action':(result.get('completion') or {}).get('next_action'),
            'review':(job.get('review') or {}).get('decision'),
@@ -79,11 +97,11 @@ def result_brief(job):
     return bounded(value,2048)
 
 
-def progress_summary(job, queue_position=None):
+def progress_summary(job, queue_position=None, queue_wait=None):
     p = job.get('progress') or {}
     value = {'id':job['id'],'state':job['state'],'role':job['request']['role'],
              'review':{'decision':job['review']['decision']} if job.get('review') else None,
-             'queue_position':queue_position, 'phase':p.get('phase',job['state']),
+             'queue_position':queue_position, 'queue_wait_upper_bound_seconds':queue_wait, 'eta_seconds':p.get('eta_seconds'), 'phase':p.get('phase',job['state']),
              'active_check':str(p.get('active_check') or '')[:120] or None,
              'elapsed_seconds':round((job.get('ended') or time.time())-(job.get('started') or job['created']),1),
              'deadline':p.get('deadline'), 'heartbeat':p.get('heartbeat'), 'last_output_at':p.get('last_output_at'),
@@ -94,6 +112,6 @@ def progress_summary(job, queue_position=None):
 
 def history_item(job):
     return {k:job.get(k) for k in ('id','state','created','started','ended')} | {
-        'request':{k:job['request'].get(k) for k in ('role','repo','caller','workflow')} | {'task':job['request']['task'][:160]},
+        'request':{k:job['request'].get(k) for k in ('role','repo','caller','workflow','board')} | {'task':job['request']['task'][:160]},
         'review':{'decision':job['review']['decision'], 'notes':''} if job.get('review') else None,
         'result':{'worker_status':(job.get('result') or {}).get('worker_status'), 'usage':(job.get('result') or {}).get('usage')}}

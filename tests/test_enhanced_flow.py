@@ -51,7 +51,10 @@ async def test_personal_tools_no_repo_and_review_no_edits(tmp_path,repo):
         request=JobRequest(role=role,repo=str(repo) if role=='editor' else None,allowed_paths=['app.ts'] if role=='editor' else [],task='Test',idempotency_key=role)
         (directory/'request.json').write_text(request.model_dump_json())
         names={t.name for t in await create_tools(directory,phase).list_tools()}
-        if role=='personal':assert names=={'plan_web_task','search_web','fetch_web'}
+        if role=='personal':
+            assert names=={'search_web','fetch_web'}  # plain mode has no mandatory planning tool
+            strict=JobRequest(role='personal',task='Test',idempotency_key='strict',verify=True);(directory/'request.json').write_text(strict.model_dump_json())
+            assert {t.name for t in await create_tools(directory,phase).list_tools()}=={'plan_web_task','search_web','fetch_web'}
         else:assert 'replace_lines' not in names and 'edit_file' not in names and 'read_check_output' in names
 
 
@@ -199,7 +202,7 @@ async def test_personal_search_only_answer_is_unverified_and_tool_trace_saved(tm
     from types import SimpleNamespace
     from hub.report import final_report
     directory=tmp_path/'personal';directory.mkdir();(directory/'workspace').mkdir()
-    request=JobRequest(role='personal',task='Weather in a public city',idempotency_key='sources',execution_preset='work')
+    request=JobRequest(role='personal',task='Weather in a public city',idempotency_key='sources',execution_preset='work',verify=True)
     (directory/'request.json').write_text(request.model_dump_json())
     class Tools:
         async def list_tools(self):return [SimpleNamespace(name='search_web',description='public search',inputSchema={'type':'object','properties':{}})]
@@ -240,7 +243,7 @@ async def test_completion_uses_failed_check_not_model_assurance(repo,store):
 @pytest.mark.asyncio
 async def test_cancel_flushes_received_thinking(tmp_path,monkeypatch):
     directory=tmp_path/'cancel';directory.mkdir();(directory/'workspace').mkdir()
-    request=JobRequest(role='personal',task='Hello',idempotency_key='flush')
+    request=JobRequest(role='personal',task='Hello',idempotency_key='flush',agent_loop=True)
     (directory/'request.json').write_text(request.model_dump_json())
     received=asyncio.Event()
     async def response(client,url,body,headers,on_segment):

@@ -25,6 +25,16 @@ class PublicBackend(AutoBackend):
         return await super().connect_tcp(addresses[0][4][0],port,timeout,local_address,socket_options)
 
 
+def main_text(html):
+    """Main content via trafilatura (tables kept, comments dropped); empty when it finds nothing useful."""
+    try:
+        import trafilatura
+        text=trafilatura.extract(html,include_comments=False,include_tables=True,favor_recall=True,deduplicate=True) or ''
+    except Exception:
+        return ''
+    return text if len(text.strip())>=200 else ''
+
+
 def transport():
     result=httpx.AsyncHTTPTransport(trust_env=False,retries=0)
     result._pool._network_backend=PublicBackend()
@@ -79,7 +89,8 @@ async def fetch_origin(url, validate_url):
                     raw=bytes(data).decode(response.encoding or 'utf-8',errors='replace')
                     if 'html' in mime:
                         parser=PageText();parser.feed(raw)
-                        text='\n'.join(parser.main or parser.parts);title=' '.join(parser.title)[:500]
+                        title=' '.join(parser.title)[:500]
+                        text=main_text(raw) or '\n'.join(parser.main or parser.parts)
                     else:text=raw;title=''
                     text=re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]','',text)
                     if not text.strip():raise ValueError('Origin returned no readable text')

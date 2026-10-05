@@ -146,7 +146,8 @@ remain unknown unless separately measured. `--model-context 32768` and
 | Researcher | Configured public search and hosted page extraction; no repository or context attachment |
 | Personal | General public questions and configured public search/fetch; no repository or private account access |
 
-There is one FIFO executor, one Ollama inference slot, one Qwen3.5 9B model, and a
+There is one FIFO executor, one Ollama inference slot, one resident model at a time
+(Gemma 4 12B by default; Qwen3.5 9B for board triage and some proposals), and a
 16K default model context. Eight tool rounds and at most 18 model steps bound exploration;
 older large tool outputs are shortened and a final tools-disabled turn is reserved.
 Edits require a fresh observed read; symlinks, hardlinks, secret files and excluded
@@ -379,3 +380,119 @@ avoid repeated failing calls. Default provider configuration remains unchanged.
 Missing fallback credentials or poor results stay explicit gaps; no URLs or
 facts may be invented to compensate. [SearXNG](https://docs.searxng.org/) is a self-hostable
 open-source alternative; it would require an instance and a separate adapter.
+
+
+## Host-driven pipelines (default)
+
+Small local models skipped searches, trusted stale snippets, converted units in their heads and invented citations
+when they drove the procedure through tool calls; Ollama's tool-call layer for Qwen3.5 and Gemma 4 also has open
+bugs. The default paths therefore use no tool calling. The host does the procedure; the model makes a small
+schema-constrained decision and then reads and writes text.
+
+**Ask (Personal and Researcher)**, `hub/ask.py`:
+
+1. Decide (one JSON call): does this need the web, up to two search queries, the reply language.
+2. Search (`hub/retrieval.py`): SearXNG, then Exa, then LangSearch, with every fallback reported.
+3. Read the best three pages live through the DNS-pinned origin reader. Main text is extracted with trafilatura.
+   A page that cannot be read falls back to a labelled third-party copy, or to its search snippet.
+4. Rank 900-character passages with BM25 and give the model numbered excerpts with their kind and read time.
+5. Answer (one JSON call): the answer, the excerpt numbers used, whether the question was answered, and
+   optionally one follow-up query, which triggers one more search round.
+6. The host removes any source lines or unfetched links the model wrote. It appends `Sources:` from the excerpts
+   actually used, with real URLs and local "as of" times, and converts imperial units and 12-hour times (unless
+   the user asked for them).
+
+Typical time is 10-20 s. COMPLETE when the model answered; PARTIAL when the sources did not contain the answer.
+`--extended` gives the answer step 32K and thinking, without the strict reviewer. `--verify` keeps the older strict
+research loop with origin-proof quotes; `--review` adds the independent requirements review. `--agent-loop` uses
+the older model-driven tool loop, for comparison.
+
+`~/.config/local-worker/preferences.json` (optional): `{"units": "metric", "clock": "24h", "timezone": "Europe/Belgrade"}`.
+
+**SearXNG**: `local-worker web setup-searxng` writes `~/.config/local-worker/searxng/settings.yml` with a random
+secret and starts a container bound to 127.0.0.1:8888 (JSON on, limiter off). It then selects it as the search
+provider. `local-worker web status` checks its health. Some engines (Brave, DuckDuckGo) often refuse self-hosted
+instances; Exa remains the fallback. The strict `--verify` loop keeps using Exa.
+
+**Investigator**, `hub/pipelines.py` and `hub/localize.py`, Agentless-style:
+
+- The host builds a repository map (files and top-level symbols) and runs literal searches for identifiers named in the task.
+- The model picks up to six line ranges; the host reads them through the scoped reader, which keeps evidence IDs and guards.
+- The model answers and may ask for one more read round.
+
+**Editor**, `hub/textedit.py`, aider-style:
+
+- The host puts the authorized files in the prompt (regions around named identifiers for files over 400 lines).
+- The model replies with `FILE:` plus SEARCH/REPLACE blocks, or WHOLE blocks for small or new files.
+- Blocks apply by exact match, then a whitespace-tolerant match with indentation correction.
+- Ambiguous or missing matches get one corrective turn with the exact error.
+- Writes go through `ScopedFiles` (exact paths, symlink, hardlink, secret and freshness checks against the hash taken
+  when the host read the file).
+
+## Coding: checks decide
+
+`--workflow implement` runs the edit, then the approved checks. Passing checks with a real diff mean COMPLETE; the
+local review runs only with `--review` and its findings are advisory notes. A failed check triggers one targeted
+repair (`--repair-attempts`) fed with the failing output, through the same text edit protocol.
+
+## Hardware and runtime notes
+
+- **Memory:** On this class of machine (12 GB VRAM, 16 GB RAM, WSL with about 8 GB), 9-12B dense models are the
+  practical tier. 30-35B mixture-of-experts models with about 3B active parameters reportedly reach 30-40 tok/s on
+  12 GB cards with experts kept in system RAM, but need about 18-20 GB of RAM in total. A 32 GB upgrade and a
+  larger `memory=` in `.wslconfig` would allow testing that.
+- **Ollama alternatives:** llama.cpp `llama-server` is reported about 10% faster than Ollama and allows MoE offload
+  and speculative decoding. LM Studio matches llama.cpp. TabbyAPI/ExLlamaV3 is reported 30-60% faster on NVIDIA
+  but needs EXL3 quants. The host pipelines only need chat plus JSON-schema output, so the backend can be swapped
+  later after a measured comparison.
+
+## Background delegation for Claude/Codex
+
+```sh
+local-worker delegate --read-only "Find where the retry timeout is set"   # run in the background; prints one JSON brief
+local-worker watch JOB_ID                                                   # optional progress lines for Monitor
+```
+
+`delegate` submits, waits quietly and prints only the compact brief (status, findings, changed files, checks, next
+action), exiting 0 complete, 2 partial, 124 timeout, 130 cancelled. In Claude Code run it as a background command and
+keep working; Codex can use a background terminal. Over MCP use `submit_job`, then `get_job` (it reports
+`eta_seconds` and an upper bound on queue wait) and `get_result`; MCP calls never block for long. For git state use a
+Validator job with approved argv checks (`git status --short`), which costs no model tokens. One job runs at a time, so
+a long job delays the ones behind it.
+
+## Board deliberation (opt-in, rarely useful)
+
+```sh
+local-worker --board "..."                      # skeptic + challenger proposals
+local-worker --board --board-mode full "..."    # four proposals
+```
+
+The board is available for Personal and Researcher only, with a 300 s budget and fixed 16K contexts. In the pilot it was
+3-4x slower than the normal flow without a measurable benefit (`benchmarks/RESULTS.md`), so use it only for open-ended
+tasks with several implicit requirements. Flow, one model call at a time:
+
+1. **Triage** (Qwen, thinking off) skips the board for greetings, definitions and single-fact lookups; a skipped job
+   runs the normal flow. If external facts are needed it proposes one short neutral search query.
+2. **Scout:** the host runs that single search through the job's web ledger (no fetches, no tool loop). Only the
+   skeptic proposer sees the snippets, marked untrusted.
+3. **Proposals** in fresh contexts, tools off, thinking off, structured JSON: `lite` runs a skeptic (Qwen) and a
+   challenger (Gemma); `full` adds a direct (Qwen) and first-principles (Gemma) proposer. Proposers never see each
+   other and have no field for facts. Every requirement must quote the task verbatim.
+4. **Arbiter** (Gemma, thinks then formats in a separate turn) sees shuffled anonymous candidates; nothing is voted.
+   It decides whether web access is needed at all.
+5. **Host drift report** (`board-drift.json`, plain code): explicit requirements the arbiter dropped, requirements
+   without a verbatim task quote, and task clauses no requirement covers.
+6. **One executor pass** answers in plain language with the board's briefing and the shared web ledger (6 searches,
+   10 fetches, pages shared for 10 minutes). If the board decides no web is needed, web tools are withheld.
+   There is no critic, repair or second review.
+
+A board with fewer than two usable proposals, or an unusable arbiter, falls back to the normal single flow and is
+recorded as degraded. Phase order (Qwen phases, then Gemma phases) keeps model swaps to one or two per job.
+
+Host memory: llama.cpp keeps its prompt cache in host RAM and Ollama's default limit (8 GB) exceeds a small
+WSL host, so the Linux OOM killer can end Ollama mid-job. Set `LLAMA_ARG_CACHE_RAM=512` (MiB) in the Ollama
+service environment (verified to bound memory growth). As a fallback the hub unloads resident models when available
+RAM drops below `LOCAL_WORKER_MIN_AVAILABLE_MB` (default 2500), at the cost of a reload (about 10s), and records
+`memory-guard` events. `local-worker doctor` reports host memory and the configured cache limit. KV cache is already
+q8_0 with flash attention for both models; `LLAMA_ARG_NO_MMPROJ_OFFLOAD=1` would move the vision projector to host RAM
+(Qwen: -1.26 GiB VRAM, +0.87 GB RAM) and is not needed while a single model uses about 9 of 12 GB.
