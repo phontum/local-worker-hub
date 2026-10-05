@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { api, artifactUrl } from './api';
 
 type Phase = { phase: string; model?: string | null; thinking?: boolean | null; ok: boolean; error?: string | null; seconds: number; output_tokens?: number | null };
 export type Board = { state: string; mode: string; degraded?: string | null; swaps?: number; drift_flags?: number; needs_web?: boolean | null;
@@ -6,11 +7,7 @@ export type Board = { state: string; mode: string; degraded?: string | null; swa
 };
 type Requirement = { id: string; kind: string; task_quote: string; requirement: string; acceptance: string; supported_by?: string[] };
 
-async function artifact(jobId: string, name: string): Promise<any> {
-  const response = await fetch(`/api/jobs/${jobId}/artifacts/${encodeURIComponent(name)}`);
-  if (!response.ok) throw new Error(`${name} unavailable`);
-  return JSON.parse(await response.text());
-}
+const artifact = (jobId: string, name: string) => api<any>(artifactUrl(jobId, name));
 
 const modelLabel = (name?: string | null) => name ? name.split(':')[0] : '—';
 

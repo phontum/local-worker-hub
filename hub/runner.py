@@ -592,7 +592,8 @@ class Runner:
                 result['ask']={'decision':recorded.get('decision'),'queries':(recorded.get('retrieval') or {}).get('queries'),
                     'providers':(recorded.get('retrieval') or {}).get('providers'),'failures':((recorded.get('retrieval') or {}).get('failures') or [])[:4],
                     'pages':((recorded.get('retrieval') or {}).get('pages') or [])[:6],'excerpts':recorded.get('excerpts',[])[:12],
-                    'used':(recorded.get('answer') or {}).get('used',[])}
+                    'used':(recorded.get('answer') or {}).get('used',[]),
+                    'provider':(recorded.get('retrieval') or {}).get('provider'),'products':((recorded.get('retrieval') or {}).get('products') or [])[:8]}
             verification=directory/('answer-review.web-verification.json' if answer_review else 'work.web-verification.json')
             result['research_plans']=[p.name for p in (directory/'work.research-plan.json',directory/'answer-review.research-plan.json') if p.is_file()]
             if verification.is_file():

@@ -37,7 +37,7 @@ def resolve_phase(request, profiles, phase, report_only=False):
         raise ValueError('Context must be 16384 or 32768')
     thinking = False if report_only else (request.model_thinking if request.model_thinking is not None else
         request.execution_preset == 'extended' or bool(profile.get('thinking', phase in THINKING_PHASES)))
-    alias = str(profile.get('model', DEFAULT_ALIAS))
+    alias = request.model or str(profile.get('model', DEFAULT_ALIAS))  # a per-request model beats every profile, for all phases of the job
     return PhaseSpec(phase=phase, alias=alias, model=model_name(alias), context=context,
         output_limit=max(256, min(4096, int(profile.get('output', 4096)))), thinking=thinking,
         steps=2 if report_only or request.role == 'validator' else max(2, min(18, int(profile.get('steps', 12)))),

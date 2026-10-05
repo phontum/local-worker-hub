@@ -2,6 +2,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pathlib import Path
 import re
+from .model_registry import models as registered_models
 
 Role = Literal['investigator', 'editor', 'validator', 'researcher', 'personal']
 
@@ -24,6 +25,12 @@ def default_timeout(role, preset=None, board=False, verify=False, review=False):
     if role in ('personal', 'researcher') and not (board or verify or review or preset == 'extended'):
         return 120
     return 300
+
+class Turn(BaseModel):
+    """One earlier chat message; follow-ups see a few of these so \"and tomorrow?\" can be understood."""
+    model_config = ConfigDict(extra='forbid')
+    role: Literal['user', 'assistant']
+    text: str = Field(max_length=800)
 
 class JobRequest(BaseModel):
     role: Role = 'investigator'
@@ -58,6 +65,8 @@ class JobRequest(BaseModel):
     board_mode: Literal['full', 'lite'] | None = None
     verify: bool = False
     agent_loop: bool = False
+    model: str | None = Field(default=None, pattern=r'^[a-z][a-z0-9_-]{0,30}$')
+    history: list[Turn] = Field(default_factory=list, max_length=6)
 
     @model_validator(mode='after')
     def boundaries(self):
@@ -67,6 +76,8 @@ class JobRequest(BaseModel):
             self.timeout = 300
         if self.verify and self.role not in ('personal', 'researcher'): raise ValueError('verify applies to public web roles only')
         if self.board_mode and not self.board: raise ValueError('board_mode requires board')
+        if self.model and self.model not in registered_models(): raise ValueError('Unknown local model alias: ' + self.model)
+        if self.model and self.board: raise ValueError('Board phases choose their own models; omit model')
         if self.board:
             if self.role not in ('personal', 'researcher'): raise ValueError('Board deliberation is available for public web roles only in this version')
             if self.execution_preset in ('small', 'extended') or self.model_context == 32768:
@@ -78,6 +89,7 @@ class JobRequest(BaseModel):
             if not p.is_dir() or p in (Path('/'), Path.home()):
                 raise ValueError('Select a project directory, not the home directory or filesystem root')
             self.repo = str(p)
+            if self.history: raise ValueError('Chat history applies to public web roles only')
         elif self.repo or self.context or self.allowed_paths or self.read_paths or self.evidence_job_ids or self.checks or self.source_job_id or self.profile_hash or self.profile_ref or self.check_groups or self.parameters:
             raise ValueError('Public web roles accept a public task brief only; no repository/context/checks')
         if any(not re.fullmatch(r'[a-f0-9]{32}', ident) for ident in self.evidence_job_ids):

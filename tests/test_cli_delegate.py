@@ -56,3 +56,11 @@ def test_default_personal_timeout_and_verify_flag(monkeypatch,repo):
     assert run(monkeypatch,'--async','--verify','Cheapest card in stock?')==0
     strict=JobRequest.model_validate(seen[1][2]);assert strict.timeout==300 and strict.verify
     assert run(monkeypatch,'--async','--read-only','--verify','x')==2  # verify is for public web roles only
+
+def test_model_flag_reaches_the_request_and_unknown_aliases_are_refused(monkeypatch,capsys):
+    seen=fake(monkeypatch,[('/api/jobs',{'id':ID,'state':'queued'})])
+    run(monkeypatch,'--async','--model','qwen','hello')
+    posted=[data for method,path,data in seen if method=='POST' and path=='/api/jobs']
+    assert posted and posted[0]['model']=='qwen' and posted[0]['role']=='personal'
+    assert run(monkeypatch,'--async','--model','gpt-9','hello')==2
+    assert 'Unknown local model alias' in capsys.readouterr().err

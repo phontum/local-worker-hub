@@ -75,6 +75,12 @@ def test_units_follow_preferences_unless_the_user_asked_for_them():
     assert 'ветер 3,2 км/ч' in answers.render('ветер 0,9 м/с', [], [], True, 'погода', prefs=PREFS)
     assert 'wind 10.8 km/h' in answers.render('wind 3 m/s', [], [], True, 'weather', prefs=PREFS)
 
+def test_source_titles_are_converted_to_the_preferred_units_too():
+    excerpt = {'n': 1, 'url': 'https://w.example/today', 'title': 'Novi Sad Weather Today | 62°F, Partly cloudy', 'kind': 'page', 'observed_at': NOW, 'text': 't'}
+    metric = answers.render('Mild.', [excerpt], [1], True, 'Weather in Novi Sad?', prefs=PREFS)
+    assert '17°C, Partly cloudy' in metric and '62°F' not in metric and 'https://w.example/today' in metric
+    assert '62°F' in answers.render('Mild.', [excerpt], [1], True, 'Weather in Novi Sad in Fahrenheit?', prefs=PREFS)
+
 # Ask pipeline ----------------------------------------------------------------------------------------------------------
 
 def ask_job(tmp_path, task, **kw):
@@ -280,3 +286,19 @@ async def test_edit_thinks_only_when_explicitly_asked_even_if_the_role_profile_s
     monkeypatch.setattr(calls, 'call', call)
     await pipelines.run_edit(directory, 'edit', 'Set answer to 42', 'edit')
     assert seen == [expected]
+
+@pytest.mark.asyncio
+async def test_a_bare_boolean_answer_is_retried_once_and_then_reported_as_partial(tmp_path, monkeypatch):
+    directory = ask_job(tmp_path, 'Thanks, that was helpful.')
+    seen = fake_models(monkeypatch, {'needs_web': False, 'queries': [], 'reply_language': 'English'},
+                       [{'answer': 'true', 'used': [], 'answered': True, 'follow_up_query': ''}, {'answer': "You're welcome!", 'used': [], 'answered': True, 'follow_up_query': ''}])
+    await ask.run_ask(directory, 'work', 'Thanks, that was helpful.')
+    report = final_report(json.loads((directory / 'work.session.json').read_text()))
+    assert report['status'] == 'COMPLETE' and report['findings'] == "You're welcome!"
+    assert [n for n, _ in seen] == ['ask-decide', 'ask-answer', 'ask-answer'] and 'never a bare true' in seen[2][1]['messages'][0]['content']
+    (tmp_path / 'second').mkdir()
+    directory = ask_job(tmp_path / 'second', 'Thanks!')
+    fake_models(monkeypatch, {'needs_web': False, 'queries': [], 'reply_language': 'English'}, [{'answer': 'true', 'used': [], 'answered': True, 'follow_up_query': ''}] * 2)
+    await ask.run_ask(directory, 'work', 'Thanks!')
+    stuck = final_report(json.loads((directory / 'work.session.json').read_text()))
+    assert stuck['status'] == 'PARTIAL' and 'true' not in stuck['findings'].lower().split('could not')[0]

@@ -26,7 +26,7 @@ def create_server():
                    model_context: int | None=None, model_thinking: bool | None=None,
                    execution_preset: str | None=None, read_paths: list[str] | None=None,
                    evidence_job_ids: list[str] | None=None, handoff_id: str | None=None,
-                   review_pass: bool | None=None, board: bool=False, board_mode: str | None=None, verify: bool=False, agent_loop: bool=False) -> dict:
+                   review_pass: bool | None=None, board: bool=False, board_mode: str | None=None, verify: bool=False, agent_loop: bool=False, model: str | None=None) -> dict:
         """Submit a bounded local task. Researcher accepts only a sanitized public brief; Editor requires exact file scope. Reuse the same key only for transport retries. Public web roles answer in plain language by default (about 30-60s). verify=true runs strict origin-proof research (slower, may end PARTIAL). board=true is a rarely useful anonymous multi-model deliberation (slower, FIFO queue); skip it when the task is already specified. The call returns immediately: continue other work, then poll get_job (it reports eta_seconds and queue wait) and read get_result."""
         request=JobRequest(role=role,task=task,repo=repo,allowed_paths=allowed_paths or [],checks=checks or [],
             context=context,caller=caller,caller_session=caller_session,idempotency_key=idempotency_key,
@@ -35,7 +35,7 @@ def create_server():
             check_groups=check_groups or [],parameters=parameters or {},workflow=workflow,
             repair_attempts=repair_attempts,investigate_first=investigate_first,
             model_context=model_context,model_thinking=model_thinking,execution_preset=execution_preset,review_pass=review_pass,
-            read_paths=read_paths or [],evidence_job_ids=evidence_job_ids or [],handoff_id=handoff_id,board=board,board_mode=board_mode,verify=verify,agent_loop=agent_loop)
+            read_paths=read_paths or [],evidence_job_ids=evidence_job_ids or [],handoff_id=handoff_id,board=board,board_mode=board_mode,verify=verify,agent_loop=agent_loop,model=model)
         result=call('POST','/api/jobs',request.model_dump())
         return {'id':result['id'],'state':result['state'],'role':result['request']['role']}
 

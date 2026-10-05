@@ -344,3 +344,104 @@ be left to decide alone whether to look things up, convert units or write source
 - Decision: Gemma 4 12B stays the default for every step (better answers and edits; a single model avoids swaps).
   Qwen remains selectable per phase in roles.json.
 - SearXNG (self-hosted, Docker) answered every query, but only via Google CSE; Brave and DuckDuckGo refused the instance.
+
+## Realistic personal eval set and replayable web — 2026-10-05 (baseline before structured providers)
+
+`benchmarks/evals/personal.jsonl` replaces the 12 inline questions with 58 cases: stable facts, math and code (direct), typos,
+Serbian/German/Russian questions, unit and clock requests, weather (8), currency (3), current software/people facts, and
+shopping (7, including variants and a JavaScript-heavy store). Each case records the route it should take
+(`direct`, `web`, `provider:weather|fx|clock`), regexes that must or must not match and whether the data is current.
+`--web record` stores search results and page text under the private state directory; `--web replay` serves them back with no
+network, so only the model varies. Gemma 4 12B at 16K, host pipelines, `work` preset. No code other than the harness changed.
+
+| | Live record pass (1 run per case) | Replay, 3 runs per case |
+| --- | --- | --- |
+| Runs | 58 | 174 (58 cases) |
+| Route as expected, exact | 42/58 | 126/174 |
+| Route as expected, web accepted for provider cases | 51/58 | 168/174 |
+| Required text present (cases with a regex) | 37/37 | 106/111 |
+| Metric units and 24 h clock in the answer | 56/58 | 168/174 |
+| Fetched links only | 58/58 | 174/174 |
+| COMPLETE | 53/58 | 171/174 |
+| Median time | web 9.1s (live), direct 2.6s | web 5.1s, direct 2.6s |
+
+- Providers do not exist yet, so every weather (24 runs), currency (9) and clock (9) run went to generic web search: 0 exact
+  route matches for those categories is the expected starting point. They are the target of the provider work.
+- `clarify-weather` ("What's the weather like?", no place) searched the web in 3/3 runs although the prompt says to ask for the
+  place. `web-ollama-flag` (a specific Ollama setting) was answered from memory in all 4 runs (live and replay) and was right in only 2 of them, so the router
+  treats an uncertain specific as stable knowledge.
+- Both unit failures are the same bug: the answer body is converted to metric but the cited page titles are not, so a source
+  line such as "Weather Today | 62°F, Partly cloudy" leaves Fahrenheit in the reply (weather-ns, weather-sr-week).
+- `fx-rsd` failed its required text 3/3: the model answered from a generic page without the amount. The ECB reference rates behind
+  the planned currency provider do not include the Serbian dinar, so that case will fall back to web search.
+- Replay integrity: 90 web jobs, 115 searches served from fixtures, 0 live, but 33 searches missed because the model asked for a
+  follow-up query that was never recorded (reported as a normal failed search, never invented). The harness now counts these
+  (`fixture_misses`); fixtures from this pass are the `baseline` set. Treat web answers from replay as comparable between
+  models and code, not as current facts.
+- Gotchas found while building this: the hub's job process starts with a minimal environment, so the switch is a private config
+  file with an expiry rather than an environment variable; and job processes load `hub/` code per job, so editing the source during a
+  run changes the run. One earlier attempt was discarded for that reason.
+
+## Structured providers and provider routing — 2026-10-05
+
+Same 58 cases, Gemma 4 12B, replay mode (`baseline` fixture set plus provider fixtures recorded once from the live APIs), 3 runs per case.
+Providers: weather (Open-Meteo), currency (Frankfurter/ECB) and clock; the decide call chooses one with its arguments.
+
+| | Baseline (web only) | With providers |
+| --- | --- | --- |
+| Route as expected, exact (`fx-rsd` relabelled `web`: ECB has no RSD) | 129/174 | 168/174 |
+| Weather routed to the provider | 0/24 | 21/24 |
+| Currency routed to the provider (RSD case falls back to web by design) | 0/6 | 6/6 |
+| Clock routed to the provider | 0/9 | 9/9 |
+| Required text present | 106/111 | 110/111 |
+| Metric units and 24 h clock in the answer (after the source-title fix) | 168/174 | 174/174 |
+| Searches that missed a replay fixture | 33 | 4 (after nearest-query matching) |
+| Median time, weather cases | 4.35s | 4.1s |
+
+- Routing was the real work. The first provider prompt sent 2/8 weather questions to the provider: the base prompt listed "weather" as a
+  needs-web topic and the model committed to `needs_web: true` first. Putting the provider fields first in the schema made no
+  measurable difference; removing weather from the base list, describing what the provider covers (rain, wind, forecast, any
+  language) and two examples did. On the 24 questions used while tuning, 24/24; on 20 phrasings written afterwards (other cities and
+  languages, plus traps such as "check the weather in Python", "weather at Waterloo", "euro symbol in Unicode"), 19/20, the miss being
+  "How hot will it get in Madrid on Tuesday afternoon" (needs date arithmetic). The tuning score overstates generalization because two
+  prompt examples resemble two tuning questions; the held-out figure is the one to rely on. Single run, temperature 0.
+- Still web instead of the provider: `weather-sr-week` ("Kakvo je vreme u Beogradu ovog vikenda?", 3/3), and `web-ollama-flag` is still
+  answered from memory (3/3) because the router treats it as stable knowledge.
+- Answers from provider data are shorter and correct against the data (the window 15:00-20:00 now reaches the provider as
+  `from_hour`/`to_hour`). The model still dropped the "other places share this name" warning for Springfield, so the host now writes that
+  note itself.
+- The replay compares models and code, not the world: provider fixtures freeze the weather of the recording day, and search replay
+  serves the nearest recorded query when a prompt rewords it (Jaccard >= 0.6, reported in the audit).
+
+## Product markup, browser reads, chat guard — 2026-10-05
+
+Final replay of the 58 cases (3 runs each, `baseline` fixtures + provider fixtures) with every change in place, and live checks of the two
+page-reading additions. Gemma 4 12B, 16K, work preset.
+
+| Replay, 174 runs | Baseline | After providers | Final |
+| --- | --- | --- | --- |
+| Route as expected, exact (`fx-rsd` relabelled `web`) | 129 | 168 | 168 |
+| Required text present | 106/111 | 110/111 | 122/123 |
+| Metric units, 24 h clock | 168 | 174 | 174 |
+| COMPLETE | 171 | 172 | 171 |
+| Replay fixture misses | 33 | 4 | 3 |
+
+The required-text denominator grew from 111 to 123 because the five chat/clarify cases now have assertions (see below).
+
+- **A bug the old eval could not see.** "Thanks, that was helpful." was answered with the literal text `true` in all 6 runs of both earlier
+  replays: the answer field copied the boolean next to it, and those cases had no regex so they were counted as fine. The same happened once
+  in the dashboard chat on "Hello!". The host now rejects a bare `true/false/null/yes/no` answer, retries once with an explicit instruction, and
+  otherwise reports PARTIAL; the chat cases carry assertions. Final replay: "You are very welcome." 3/3. `clarify-price` ("How much does it
+  cost?") now fails its assertion in 1 of 3 runs ("I do not have any project context...") instead of asking what the user means.
+- **Product markup (live, 7 shopping questions, 21 page reads).** Structured product data was found on pages for 5 of the 7 questions
+  (prices in RSD, EUR, NZD, RUB, USD; availability from `schema.org`), and none for the book and the Steam Deck questions. A first version
+  missed IKEA-style offers whose price sits in a list of `priceSpecification` objects; found by reading a real page, fixed, tested. In
+  `shop-gpu-rs` the model cited the Asus product block but its claim (a Gigabyte at 76.999 RSD) came from another page, so the extraction
+  reaches the model correctly while the model's grounding of "cheapest" claims is still weak. The markup can disagree with the visible
+  page; the model is told to report such conflicts, which is not yet measured.
+- **Browser reads.** On a public client-side-rendered practice site a plain read gave "thin text" and the browser returned 1,071
+  characters in 3.3 s, against 0.6 s for the static version of the same page. In the live shopping run it was attempted once (a thin page
+  that then answered with an HTTP 4xx) and rescued nothing, so on those shops the fallback was rarely needed; it is not shown to improve
+  shopping answers. The tests check, against a real Chromium, that JavaScript content is read, private-address subrequests and redirects
+  are refused before leaving the host, a `wss://` connection is trapped and counted, POSTs, oversized responses and request floods are cut off.
+  It cannot help with sites that refuse our HTTP client, because the browser's traffic goes through that client.

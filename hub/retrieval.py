@@ -8,11 +8,14 @@ import asyncio
 import math
 import re
 from collections import Counter
+from decimal import Decimal
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 import httpx
 
+from . import web_fixtures
+from .product_extract import Product, extract_products, format_products, product_rows
 from .web_provider import ProviderUnavailable, check_exa_response, langsearch, langsearch_key, selection
 
 SEARXNG_DEFAULT = 'http://127.0.0.1:8888'
@@ -86,19 +89,54 @@ async def search(query, config, audit):
     audit('web_search', {'query': query, 'provider': None, 'fallback_reason': '; '.join(failures), 'results': [], 'retrieved_at': now()})
     return [], None, failures
 
+async def render_page(url):
+    """Render a JavaScript-dependent page in the locked-down browser; (page dict, html) or (None, reason)."""
+    from . import browser_page
+    from .scoped import public_url
+    try:
+        async with browser_page.slot():
+            text, html, metadata = await asyncio.wait_for(browser_page.render(url, public_url), browser_page.WALL_SECONDS + 5)
+    except Exception as error:  # Playwright or Chromium missing, timeout, blocked page: the origin text stays as it was
+        return None, (str(error).splitlines() or [type(error).__name__])[0][:120]
+    return {'url': url, 'text': text, 'kind': 'browser', 'title': metadata.get('title') or '', 'observed_at': metadata['observed_at'],
+            'current_eligible': metadata.get('current_eligible'), 'escaped_connections': metadata.get('escaped_connections', 0)}, html
+
 async def read_page(url):
-    """Origin read first (current-eligible evidence); hosted extraction only as a labelled fallback."""
+    """Origin read first; a page that needs JavaScript is rendered in the locked-down browser; hosted extraction is the labelled last resort.
+    The browser runs the page's scripts but the network is still our public-only client, so it cannot help with sites that refuse that client."""
+    from . import browser_page
     from .public_page import fetch_origin
     from .scoped import public_url, Research
+    html, page, reason = [], None, ''
     try:
         await public_url(url)
-        text, metadata = await asyncio.wait_for(fetch_origin(url, public_url), 20)
-        return {'url': url, 'text': text, 'kind': 'page', 'title': metadata.get('title') or '', 'observed_at': metadata['observed_at'],
+        text, metadata = await asyncio.wait_for(fetch_origin(url, public_url, html), 20)
+        page = {'url': url, 'text': text, 'kind': 'page', 'title': metadata.get('title') or '', 'observed_at': metadata['observed_at'],
                 'current_eligible': metadata.get('current_eligible')}
     except Exception as error:  # blocked, JS-only, non-HTML, private destination, timeout
         reason = str(error)[:120] or type(error).__name__
     if 'Private destinations' in reason or 'Only public' in reason:
         return {'url': url, 'error': reason}
+    wanted = None
+    if browser_page.mode() != 'off':
+        if page is None:
+            wanted = 'no readable text' if html and 'no readable text' in reason else None
+        else:
+            wanted = 'always' if browser_page.mode() == 'always' else browser_page.needs_browser(page['text'], html[0] if html else '')
+    if wanted:
+        rendered, outcome = await render_page(url)
+        if rendered and (page is None or len(rendered['text']) > len(page['text'])):
+            page, html = rendered, [outcome]
+            page['rendered_because'] = wanted
+        elif page is not None:
+            page['browser_note'] = f'rendering did not help ({wanted}): ' + (outcome if rendered is None else 'no more text')
+        else:
+            reason += f'; browser: {outcome}'
+    if page is not None:
+        products = extract_products(html[0]) if html else []
+        if products:
+            page['products'] = product_rows(products, url)
+        return page
     try:
         hosted = check_exa_response(await Research(lambda *a: None).call('web_fetch_exa', {'url': url}))
         if hosted.strip():
@@ -106,6 +144,9 @@ async def read_page(url):
     except Exception:
         pass
     return {'url': url, 'error': reason}
+
+search = web_fixtures.wrap_search(search)
+read_page = web_fixtures.wrap_read_page(read_page)
 
 def pick_urls(results_by_query, limit):
     """Interleave queries, one page per domain first, so a single site cannot crowd out the rest."""
@@ -157,6 +198,18 @@ def bm25(query, documents, k1=1.5, b=0.75):
         scores.append(score)
     return scores
 
+MAX_PRODUCT_PAGES = 3
+
+def product_excerpts(pages):
+    """Host-written PRODUCT DATA blocks from page markup, one per page, shown to the model before any page text."""
+    out = []
+    for page in pages:
+        if page.get('products') and len(out) < MAX_PRODUCT_PAGES:
+            rows = [Product(**{k: (Decimal(v) if k in ('price', 'price_high') and v is not None else v) for k, v in row.items() if k != 'url'}) for row in page['products']]
+            out.append({'url': page['url'], 'title': (page.get('title') or domain(page['url'])) + ' (product data)', 'kind': 'product',
+                        'observed_at': page['observed_at'], 'text': format_products(rows, page['url'])})
+    return out
+
 def select_excerpts(question, queries, pages, snippets, budget=BUDGET_CHARS):
     """Best page passages first (each readable page contributes its top passage), then fill by score; snippets last."""
     query = ' '.join([question, *queries])
@@ -178,7 +231,7 @@ def select_excerpts(question, queries, pages, snippets, budget=BUDGET_CHARS):
             continue
         chosen.append(candidate)
         used += len(candidate['text'])
-    excerpts = [{'url': c['page']['url'], 'title': c['page'].get('title') or domain(c['page']['url']), 'kind': c['page']['kind'],
+    excerpts = product_excerpts(pages) + [{'url': c['page']['url'], 'title': c['page'].get('title') or domain(c['page']['url']), 'kind': c['page']['kind'],
                  'observed_at': c['page']['observed_at'], 'text': c['text']} for c in chosen]
     for snippet in snippets:
         if used + len(snippet['text']) > budget:
@@ -220,4 +273,5 @@ async def gather(question, queries, audit, config=None, pages_limit=3, ledger=No
                 snippets.append({'url': r['url'], 'title': r['title'] or domain(r['url']), 'kind': 'snippet', 'observed_at': retrieved, 'text': text[:600]})
     excerpts = select_excerpts(question, queries, readable, snippets)
     return excerpts, {'queries': queries[:2], 'providers': providers, 'failures': failures, 'pages': [
-        {k: p.get(k) for k in ('url', 'kind', 'error', 'observed_at')} for p in pages]}
+        {k: p.get(k) for k in ('url', 'kind', 'error', 'observed_at', 'rendered_because', 'browser_note') if p.get(k)} | {'error': p.get('error')} for p in pages],
+        'products': [row for p in readable for row in p.get('products', [])][:8]}

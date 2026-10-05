@@ -10,7 +10,7 @@ from .preferences import load, normalize
 SOURCE_LINE = re.compile(r'(?im)^\s*[-*]?\s*(sources?|source\s+used|references?|izvori?|извор[и]?|источник[и]?|quellen?|fuentes?|fontes?)\s*[:：].*$\n?')
 LINK = re.compile(r'https?://[^\s)\]>]+')
 HEADERS = re.compile(r'(?m)^(\s*)(LOCAL_WORKER_REPORT|END_LOCAL_WORKER_REPORT|Status|Findings|Files|Checks|Risks)(:?)')
-KIND_NOTE = {'snippet': ' (search summary, may be outdated)', 'hosted': ' (copy via search provider)', 'page': ''}
+KIND_NOTE = {'snippet': ' (search summary, may be outdated)', 'hosted': ' (copy via search provider)', 'page': '', 'provider': ' (structured data)', 'product': ' (product data from page markup)', 'browser': ''}
 
 def local_time(iso, prefs):
     try:
@@ -27,7 +27,7 @@ def clean(text, allowed_urls):
     return re.sub(r'\n{3,}', '\n\n', text).strip()
 
 def sources(excerpts, used, prefs):
-    chosen = [e for e in excerpts if e['n'] in set(used)] or [e for e in excerpts if e['kind'] == 'page'][:3]
+    chosen = [e for e in excerpts if e['n'] in set(used)] or [e for e in excerpts if e['kind'] in ('page', 'browser', 'provider')][:3]
     lines, seen = [], set()
     for e in chosen:
         if e['url'] in seen:
@@ -50,7 +50,8 @@ def render(answer, excerpts, used, answered, task, note='', prefs=None):
         body = note + '\n\n' + body
     cited = sources(excerpts, used, prefs) if excerpts else []
     if cited:
-        body += '\n\nSources:\n' + '\n'.join(cited)
+        # Page titles are third-party text ("Weather today | 62°F"), so they get the same unit and clock rewrite as the answer.
+        body += '\n\nSources:\n' + normalize('\n'.join(cited), prefs, task)
     if answered:
         return envelope('COMPLETE', body)
     return envelope('PARTIAL', body, 'The sources found did not clearly contain the answer.')

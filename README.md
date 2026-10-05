@@ -55,6 +55,8 @@ that checkout. Standalone wheel deployment is not the documented installation.
 git clone https://github.com/phontum/local-worker-hub.git
 cd local-worker-hub
 uv sync --frozen
+# Browser used only to read pages that need JavaScript (about 150 MB; skip it and those pages fall back to hosted text).
+.venv/bin/playwright install chromium
 ollama pull gemma4:12b-it-qat
 ollama pull qwen3.5:9b
 npm --prefix frontend ci
