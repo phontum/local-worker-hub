@@ -1,0 +1,50 @@
+F....FF.                                                                 [100%]
+=================================== FAILURES ===================================
+_________________________ test_entry_expires_after_ttl _________________________
+
+    def test_entry_expires_after_ttl():
+        now = [0.0]
+        cache = TTLCache(10, clock=lambda: now[0])
+        cache.set('a', 1)
+        now[0] = 10.0
+>       assert cache.get('a') is None
+E       AssertionError: assert 1 is None
+E        +  where 1 = get('a')
+E        +    where get = <cache.TTLCache object at 0x7146fe590cb0>.get
+
+tests/test_cache.py:9: AssertionError
+_____________________ test_retry_passes_configured_timeout _____________________
+
+    def test_retry_passes_configured_timeout():
+        seen = []
+    
+        def fn(timeout):
+            seen.append(timeout)
+            return 'ok'
+    
+        retry(fn, attempts=1, backoff=0, timeout=2.5, sleep=lambda s: None)
+>       assert seen == [2.5]
+E       assert [5.0] == [2.5]
+E         
+E         At index 0 diff: 5.0 != 2.5
+E         Use -v to get more diff
+
+tests/test_retry.py:26: AssertionError
+_______________________ test_client_uses_config_timeout ________________________
+
+    def test_client_uses_config_timeout():
+        seen = []
+        client = Client(lambda url, timeout: seen.append(timeout) or 'ok', cfg={'max_retries': 1, 'backoff_s': 0, 'timeout_s': 9.0})
+        client.get('http://x')
+>       assert seen == [9.0]
+E       assert [5.0] == [9.0]
+E         
+E         At index 0 diff: 5.0 != 9.0
+E         Use -v to get more diff
+
+tests/test_retry.py:33: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_cache.py::test_entry_expires_after_ttl - AssertionError: as...
+FAILED tests/test_retry.py::test_retry_passes_configured_timeout - assert [5....
+FAILED tests/test_retry.py::test_client_uses_config_timeout - assert [5.0] ==...
+3 failed, 5 passed in 0.05s

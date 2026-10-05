@@ -32,6 +32,20 @@ behavior, then record acceptance/rejection/takeover through record_review.
 The hub calls Ollama directly through its native chat API: installed OpenCode V2 does not forward
 scoped MCP tools to the model. Do not substitute the permissive legacy agent.
 
+## What to delegate
+
+Delegate these constantly, with exact scope: "find all code involved in X" and "where is this config used"
+(Investigator: deterministic code index, host-verified path:line evidence); "read these files and explain how X
+works", "compare implementation A and B" and "check whether requirement R is implemented" (Investigator; a COMPLETE
+report needs at least one host-verified reference, unverified ones are listed under Risks); "make this mechanical
+change in these files", "add this specified guard", "add a regression test for this known bug" and "fix this exact
+failing test" (Editor; use --workflow implement with the failing test as the check for a fix); "run these tests and
+summarize failures" (Validator: zero tokens, failures parsed into test, file:line and assertion). The Editor works in a
+private copy of the repository: read the acceptance packet and patch.diff, then apply_result (it refuses if you
+changed those files meanwhile) or discard_result. Pass kind (find_code, explain, config_use, compare, check_requirement,
+mechanical, guard, regression_test, run_tests, fix_test) to tune defaults; regression_test verifies the new test fails on the
+current code. Architecture, ambiguous root causes and acceptance stay with you.
+
 ## Roles and invocation
 
 Investigator (--read-only / --role investigator): scoped file reads and literal searches.
@@ -86,8 +100,9 @@ is an explicitly reported fallback on Exa rate limits/transient failures when
 its private key is configured. A short per-job cooldown spans both passes;
 failure messages never become search results. The default provider is unchanged.
 LangSearch full page text is reused in cached mode; hosted fallback uses free keyless Exa.
-Editor (--write or --role editor): exact authorized file paths; no shell.
-For a specified feature slice, --workflow implement --repair-attempts 1 performs
+Editor (--write or --role editor): exact authorized file paths; no shell. It edits a private workspace
+(your tree is untouched until apply_result; --in-place / in_place edits directly) and returns a patch plus an
+acceptance packet (diff stats, scope, parsed check failures, review focus). For a specified feature slice, --workflow implement --repair-attempts 1 performs
 scoped edit and supplied checks, with one targeted repair after a failed check.
 --investigate-first adds bounded discovery. The frontier still verifies the diff
 and check evidence before acceptance. Two repairs are experimental only.
@@ -167,7 +182,7 @@ long/failing evidence adds value; original exit codes remain authoritative.
 One local job executes at a time; requests queue. Do not overlap edits with worker
 changes to its authorized files. Capture user changes before delegation; the hub
 also records before/after state. Do not reset, clean or roll back a user's tree.
-Keep the default local model (Gemma 4 12B, chosen without a head-to-head comparison) at 16K by default and concurrency at one. Explicit extended
+Keep the default local model (Gemma 4 12B, ahead of Qwen3.5 9B on the junior-task eval in benchmarks/RESULTS.md) at 16K by default and concurrency at one. Explicit extended
 32K experiments are allowed; do not promote them without measured evaluation. No recursive local-worker/OpenCode invocation is available.
 
 The final report uses LOCAL_WORKER_REPORT / END_LOCAL_WORKER_REPORT and the labels

@@ -1,5 +1,6 @@
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -69,16 +70,16 @@ async def test_bounded_workflow_repairs_and_rechecks(repo,store,repairs,expected
     async def fake_model(_job,_request,_directory,label,_prompt,**kwargs):
         calls.append((label,kwargs.get('phase')))
         if label=='edit':
-            (repo/'app.ts').write_text('export const answer = 43;\n')
+            (Path(_request.repo)/'app.ts').write_text('export const answer = 43;\n')
             result=report('COMPLETE','Made initial edit.')
         elif label.startswith('repair-'):
-            (repo/'app.ts').write_text('export const answer = '+('42' if label=='repair-'+str(repairs) else '44')+';\n')
+            (Path(_request.repo)/'app.ts').write_text('export const answer = '+('42' if label=='repair-'+str(repairs) else '44')+';\n')
             result=report('COMPLETE','Made targeted repair.')
         elif label.startswith('diagnose-'):
             result=report('PARTIAL','The previous edit still returns the wrong value.')
         else:
-            result=report('COMPLETE' if '42' in (repo/'app.ts').read_text() else 'PARTIAL',
-                          'Source and check agree.' if '42' in (repo/'app.ts').read_text() else 'The answer is still wrong.')
+            current=(Path(_request.repo)/'app.ts').read_text()
+            result=report('COMPLETE' if '42' in current else 'PARTIAL','Source and check agree.' if '42' in current else 'The answer is still wrong.')
         return {'info':{'tokens':{}}},result
     runner=Runner(store,'token');runner.execute_model=fake_model
     await runner.run(store.next())
@@ -86,7 +87,9 @@ async def test_bounded_workflow_repairs_and_rechecks(repo,store,repairs,expected
     assert result['worker_status']=='COMPLETE'
     assert len(result['attempts'])==expected_attempts
     assert result['checks'][0]['exit_code']==0
-    assert (repo/'app.ts').read_text()=='export const answer = 42;\n'
+    assert (repo/'app.ts').read_text()=='export const answer = 41;\n' and result['workspace']['origin_unchanged']  # the user's tree waits for apply_result
+    from hub import workspace
+    assert workspace.apply(job['id'])['applied']==['app.ts'] and (repo/'app.ts').read_text()=='export const answer = 42;\n'
     # Checks decide: no review or model diagnosis runs unless requested.
     assert all(kind not in ('diagnose','review') for _,kind in calls)
 
@@ -100,7 +103,7 @@ def scripted(repo,calls,edit_value='42',editor_status='COMPLETE',review_status='
     async def fake_model(_job,_request,_directory,label,prompt,**kwargs):
         calls.append((label,kwargs.get('phase'),prompt))
         if label in ('edit',) or label.startswith('repair-'):
-            if edit_value:(repo/'app.ts').write_text('export const answer = '+edit_value+';\n')
+            if edit_value:(Path(_request.repo)/'app.ts').write_text('export const answer = '+edit_value+';\n')
             return {'info':{'tokens':{}}},report(editor_status,'Edited.')
         return {'info':{'tokens':{}}},report(review_status,'The review dislikes the style.')
     return fake_model
@@ -133,3 +136,46 @@ async def test_no_authorized_change_is_never_complete(repo,store):
     job=store.submit(implement_request(repo,key='nochange'));calls=[];runner=Runner(store,'token');runner.execute_model=scripted(repo,calls,edit_value=None)
     await runner.run(store.next());result=store.get(job['id'])['result']
     assert result['worker_status']=='PARTIAL' and 'No authorized file change was made' in result['report']
+
+
+@pytest.mark.asyncio
+async def test_private_workspace_yields_patch_acceptance_packet_and_untouched_origin(repo,store):
+    from hub.settings import STATE
+    job=store.submit(implement_request(repo,key='private'));calls=[];runner=Runner(store,'token');runner.execute_model=scripted(repo,calls)
+    await runner.run(store.next());stored=store.get(job['id']);result=stored['result']
+    assert (repo/'app.ts').read_text()=='export const answer = 41;\n'
+    assert result['repo']==str(repo) and result['workspace']['state']=='ready' and result['workspace']['origin_unchanged']
+    patch=(STATE/'jobs'/job['id']/'patch.diff').read_text()
+    assert '-export const answer = 41;' in patch and '+export const answer = 42;' in patch
+    packet=result['acceptance']
+    assert packet['scope_ok'] and packet['diff']=={'files':1,'added':1,'removed':1} and packet['next_action']=='review_patch_then_apply_result'
+    assert packet['checks'][0]['status']=='passed' and packet['changed_files'][0]['path']=='app.ts'
+    assert any('Source changed without a test change' in note for note in packet['review_focus'])
+    assert result['completion']['next_action']=='review_patch_then_apply_result'
+
+
+@pytest.mark.asyncio
+async def test_apply_is_refused_when_the_user_edited_the_file_during_the_job(repo,store):
+    from hub import workspace
+    job=store.submit(implement_request(repo,key='conflict'));runner=Runner(store,'token');runner.execute_model=scripted(repo,[])
+    await runner.run(store.next())
+    (repo/'app.ts').write_text('export const answer = 99; // user edit\n')
+    assert workspace.apply(job['id'])['conflicts']==['app.ts']
+    assert (repo/'app.ts').read_text()=='export const answer = 99; // user edit\n'
+
+
+@pytest.mark.asyncio
+async def test_in_place_opt_out_edits_the_repository_directly(repo,store):
+    job=store.submit(implement_request(repo,key='inplace',in_place=True))
+    async def fake_model(_job,_request,_directory,label,prompt,**kwargs):
+        assert _request.repo==str(repo)
+        (Path(_request.repo)/'app.ts').write_text('export const answer = 42;\n')
+        return {'info':{'tokens':{}}},report('COMPLETE','Edited.')
+    runner=Runner(store,'token');runner.execute_model=fake_model
+    await runner.run(store.next());result=store.get(job['id'])['result']
+    assert (repo/'app.ts').read_text()=='export const answer = 42;\n' and 'workspace' not in result and result['worker_status']=='COMPLETE'
+
+
+def test_in_place_is_editor_only(repo):
+    with pytest.raises(ValueError):
+        JobRequest(role='investigator',repo=str(repo),task='x',idempotency_key='ip',in_place=True)

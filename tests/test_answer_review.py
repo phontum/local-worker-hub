@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import sys
 from unittest.mock import AsyncMock
 
@@ -202,7 +203,7 @@ async def test_editor_review_checks_once_and_failing_check_authoritative(repo,st
     job=store.submit(request);runner=Runner(store,'token');calls=[]
     async def model(_job,_request,directory,label,prompt,**kwargs):
         calls.append(label)
-        if label=='work':(repo/'app.ts').write_text('export const answer = 42;\n')
+        if label=='work':(Path(_request.repo)/'app.ts').write_text('export const answer = 42;\n')
         else:
             assert '+export const answer = 42' in prompt and '"exit_code": 1' in prompt
             (directory/'answer-review.json').write_text(json.dumps(assessment()))

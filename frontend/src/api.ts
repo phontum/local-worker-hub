@@ -1,7 +1,11 @@
 import type { Board } from './BoardView';
 
 export type Check = { name: string; status?: string; exit_code: number | null; timed_out?: boolean; artifact?: string; reason?: string;
-  counts?: { total: number; passed: number; failed: number; skipped: number } };
+  counts?: { total: number; passed: number; failed: number; skipped: number };
+  failures?: Array<{ tool: string; test_id: string; file?: string | null; line?: number | null; message: string }> };
+export type Acceptance = { status: string; workspace: string; diff: { files: number; added: number; removed: number };
+  changed_files: Array<{ path: string; added: number; removed: number }>; scope_ok: boolean; outside_scope: string[]; extra_files: string[];
+  attempts: number; repair_used: boolean; remaining_issue: string | null; review_focus: string[]; next_action: string };
 export type Attempt = { attempt: number; edit_status: string; review_status: string; review_findings: string;
   checks: Array<{ name: string; status: string; exit_code: number | null }> };
 export type ProviderLog = { provider: string; args?: Record<string, unknown>; fallback_reason?: string;
@@ -24,6 +28,7 @@ export type Job = { id: string; state: string; created: number; started: number 
     usage?: Record<string, number>; changed_files?: string[]; truncated?: boolean; report_origin?: string; source_job_id?: string;
     metrics?: { queue_seconds: number; check_seconds: number; analysis_seconds: number; execution_seconds: number; recovery_count: number };
     ask?: Ask | null;
+    workspace?: { state: string; origin: string; patch: string; origin_unchanged: boolean } | null; acceptance?: Acceptance | null;
     response_bytes?: number; checks?: Check[]; attempts?: Attempt[]; research_plans?: string[]; board?: Board | null;
     web_verification?: { artifact: string; verified_observations: number; verified_sources?: number; issues: string[] };
     answer_review?: { state: string; initial_status: string; status: string;

@@ -445,3 +445,73 @@ The required-text denominator grew from 111 to 123 because the five chat/clarify
   shopping answers. The tests check, against a real Chromium, that JavaScript content is read, private-address subrequests and redirects
   are refused before leaving the host, a `wss://` connection is trapped and counted, POSTs, oversized responses and request floods are cut off.
   It cannot help with sites that refuse our HTTP client, because the browser's traffic goes through that client.
+
+## Junior-task baseline, Gemma 4 12B vs Qwen3.5 9B — 2026-10-05 (current pipelines, before the index/workspace rework)
+
+`benchmarks/eval_junior.py`: 22 cases over the ten delegation shapes (find code, explain, config use, mechanical change, guard,
+regression test, run tests, fix a failing test, compare, check a requirement) on two small fixture projects, 3 runs per case, 16K,
+`work` preset, model chosen per request and verified from the job's effective-config events. Grading is mechanical: gold
+`path:line` references (file named plus a nearby line or the quoted gold line), regexes, hidden checks the worker never sees,
+and "fails on the bug, passes with the reference fix" for regression tests. Decision rule fixed beforehand: correct rate first,
+then false-COMPLETE count, median time, tokens; switch only with a lead of >= 10 points or fewer false-COMPLETE without losing correctness.
+
+| | Gemma | Qwen | Qwen, thinking on |
+| --- | --- | --- | --- |
+| Correct (66 runs each) | 47/66 (71.2%) | 38/66 (57.6%) | 33/66 (50.0%) |
+| COMPLETE but wrong | 13 | 20 | 26 |
+| Median seconds | 4.6 | 4.1 | 28.6 |
+| Tokens | 57k | 53k | 176k |
+| Regression test (fails on the bug) | 6/6 | 0/6 | 2/6 |
+| Explain / find code | 6/6, 3/6 | 4/6, 3/6 | 1/6, 1/6 |
+| Fix exact failing test, guard, mechanical | 9/9, 6/6, 6/6 | 7/9, 6/6, 6/6 | 9/9, 6/6, 5/6 |
+
+- Verdict under the rule: keep Gemma. Qwen trails by 14 points and has more false-COMPLETE; thinking makes it slower and worse here.
+- Qwen's regression tests were written but did not fail on the bug, and the report still said COMPLETE with "Checks: Not run".
+- Both models: 0/6 on "run tests and summarize failures" (the brief holds counts but not the failing test names; names are only in the raw log)
+  and 3/9 on requirement checks (the investigator read the requirements file, then answered "no code files found" or skipped code).
+  These are pipeline gaps, not model gaps, and are the targets of the index/evidence-packet and test-parser work.
+- Caveats: two tiny fixtures, one run configuration, 3 repeats; the first grader version rejected correct answers that cited
+  "line 19" instead of `path:line` and was loosened before any baseline was analysed. Re-run after the pipeline changes before relying on the winner.
+
+## Junior-task eval after the index, evidence-packet, workspace and test-parser work — 2026-10-05
+
+Same 22 cases, 3 runs each, 16K, `work` preset, model per request (verified from effective-config events). Changes under test: deterministic
+code index with host-added read ranges, host-verified `path:line` references (COMPLETE needs one), parsed test failures at zero tokens,
+private editor workspace graded after a real `apply`. Editor runs also required the user's tree to be untouched before apply.
+
+| | Gemma before | Gemma after | Qwen before | Qwen after |
+| --- | --- | --- | --- | --- |
+| Correct (66 runs) | 71.2% | 90.9% | 57.6% | 78.8% |
+| COMPLETE but wrong | 13 | 3 | 20 | 11 |
+| Median seconds | 4.6 | 5.8 | 4.1 | 4.7 |
+| Run tests and summarize failures | 0/6 | 6/6 | 0/6 | 6/6 |
+| Find all code involved | 3/6 | 6/6 | 3/6 | 6/6 |
+| Explain how X works | 6/6 | 6/6 | 4/6 | 6/6 |
+| Check a requirement | 3/9 | 6/9 | 3/9 | 6/9 |
+| Compare A and B | 3/6 | 3/6 | 3/6 | 4/6 |
+| Regression test (fails on the bug, passes with the fix) | 6/6 | 6/6 | 0/6 | 0/6 |
+| Fix an exact failing test | 9/9 | 9/9 | 7/9 | 6/9 |
+
+- Verdict under the pre-registered rule: Gemma 4 12B stays the default (12-point lead, 3 vs 11 COMPLETE-but-wrong). The pipeline work lifted both
+  models by 19-21 points, so the gap is the model's, not the harness's. Qwen's regression tests never fail on the bug and its fix-the-test
+  runs more often end COMPLETE with a wrong or partial fix.
+- Most gain is host-side: test failures are parsed deterministically, the host reads the likely ranges and verifies citations. Where the model
+  has to notice behaviour (compare reports.py with legacy_reports.py: the rounding and thousands-separator differences) neither model does.
+- Honesty changes: 12 of 33 investigator runs were COMPLETE-but-wrong before; 3 are now. Unverified citations are dropped and named; unknown
+  requirements keep the status PARTIAL through the model's `complete` flag.
+- Caveats: two small fixtures; the index ranking was tuned on these same cases (20 of 22 gold references reachable without a model, 21 after
+  the final quota tweak), so the held-out figure to trust is the live pass rate, and it needs repeating on a larger repository. Qwen with thinking
+  was only measured before the changes. One grader change (accepting "line 19" style citations) was made before any baseline was analysed.
+
+### Follow-up: job `kind`, host-verified regression tests — 2026-10-05
+
+- `kind` (find_code, explain, ..., fix_test) now checks the role and sets defaults (`fix_test` uses the implement workflow with one repair;
+  `regression_test` requires the check that runs the new test). A first version also appended a per-kind answer-format hint to the
+  investigator prompt. Measured with Gemma, 3 runs per case: overall 80.3% against 90.9% without it (explain 2/6 against 6/6, compare 0/6
+  against 3/6, 4 COMPLETE-but-wrong against 3). The hints were removed; with `kind` sent and no hints the affected shapes returned to
+  explain 6/6, compare 3/6, check a requirement 6/9, regression test 6/6.
+- Regression tests: the host runs the supplied check before the edit and after it; the new test must be a named failing test that was not failing
+  before (a collection error or a passing test is PARTIAL). On the 6 regression runs the host's verdict agreed with the hidden reference
+  grader 6/6 (host `reproduces_bug` true, hidden reference: fails on the bug and passes with the fix).
+- Held-out check on this repository (6 path-and-value lookups, Gemma): 6/6 correct; 3 of 6 first ended PARTIAL because the model cited in prose
+  ("at line 19"). The host now also accepts "file ... line N" phrasing when the line was actually read.

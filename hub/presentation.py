@@ -1,7 +1,7 @@
 """Bounded projections; full private evidence stays in the store/artifacts."""
 import json
 import time
-from .validation import failed
+from .validation import failed, failure_lines
 from .report import parse_report
 
 
@@ -44,10 +44,22 @@ def board_artifacts(board):
     return names
 
 
+def live_workspace(job):
+    """The editor workspace as recorded in the result, with its current state (it may have been applied or discarded since)."""
+    recorded=(job.get('result') or {}).get('workspace')
+    if not recorded:return None
+    try:
+        from . import workspace
+        state=workspace.read_record(job['id'])['state']
+    except Exception:state=recorded.get('state')
+    return {**recorded,'state':state}
+
+
 def result_summary(job):
     r = job.get('result')
     if r is None: return {'ready':False, 'id':job['id']}
-    checks = [{k:v for k,v in c.items() if k in ('name','status','exit_code','timed_out','seconds','artifact','reason','counts')} for c in r.get('checks',[])]
+    checks = [{k:v for k,v in c.items() if k in ('name','status','exit_code','timed_out','seconds','artifact','reason','counts')} |
+              ({'failures':[{**f,'message':f['message'][:160]} for f in c['failures'][:10]]} if c.get('failures') else {}) for c in r.get('checks',[])]
     refs = ['report.txt','before-status.txt','after-status.txt','before-diff.txt','after-diff.txt','before-staged.txt','after-staged.txt']
     if job['request'].get('role')=='editor':refs.append('scoped-diff.txt')
     if r.get('answer_review'):
@@ -66,6 +78,7 @@ def result_summary(job):
                  changed_files=r.get('changed_files',[])[:20], changed_file_count=len(r.get('changed_files',[])),
                  review=job.get('review'), attempts=r.get('attempts',[])[:3], workflow=r.get('workflow'),
                  answer_review=r.get('answer_review'), board=r.get('board'), ask=r.get('ask'), artifacts=refs, full_result=f"/api/jobs/{job['id']}/result?view=full")
+    if r.get('workspace'):value.update(workspace=live_workspace(job),acceptance=r.get('acceptance'));value['artifacts']=[*refs,'patch.diff']
     parsed=parse_report(r.get('report') or '')
     if parsed:value['answer']=parsed['findings'][:3000]
     if value.get('metrics'):
@@ -85,13 +98,18 @@ def result_brief(job):
            'findings':parsed['findings'][:600] if parsed else '',
            'changed_files':result.get('changed_files',[])[:12],
            'checks':[{'name':c.get('name'),'status':c.get('status'),'exit_code':c.get('exit_code'),
-                      'artifact':c.get('artifact'),'reason':c.get('reason')}
+                      'artifact':c.get('artifact'),'reason':c.get('reason')} |
+                     ({'failures':[l.strip()[5:85] for l in failure_lines(c,limit=5,width=40)]} if c.get('failures') else {})
                      for c in result.get('checks',[])],
            'attempts':len(result.get('attempts',[])),
            'board':{'state':board.get('state'),'mode':board.get('mode'),'degraded':board.get('degraded'),'drift_flags':board.get('drift_flags'),
                     } if (board:=result.get('board')) else None,
            'requirements_review':{k:(result.get('answer_review') or {}).get(k) for k in ('state','status','initial_status')} if result.get('answer_review') else None,
            'next_action':(result.get('completion') or {}).get('next_action'),
+           'workspace':({'state':(live_workspace(job) or {}).get('state'),'origin_unchanged':result['workspace'].get('origin_unchanged'),'patch':'patch.diff'}
+                        if result.get('workspace') else None),
+           'acceptance':({'scope_ok':a['scope_ok'],'diff':a['diff'],'review_focus':a['review_focus'][:3],'repair_used':a['repair_used']}
+                         if (a:=result.get('acceptance')) else None),
            'review':(job.get('review') or {}).get('decision'),
            'evidence':f"/api/jobs/{job['id']}/result?view=summary"}
     return bounded(value,2048)

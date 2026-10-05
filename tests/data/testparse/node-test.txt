@@ -1,0 +1,78 @@
+TAP version 13
+# Subtest: late evening is quiet
+not ok 1 - late evening is quiet
+  ---
+  duration_ms: 3.943798
+  type: 'test'
+  location: '/work/notify/test/quiet.test.js:5:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    
+    false !== true
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (/work/notify/test/quiet.test.js:6:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.start (node:internal/test_runner/test:944:17)
+    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)
+  ...
+# Subtest: early morning is quiet
+not ok 2 - early morning is quiet
+  ---
+  duration_ms: 0.427692
+  type: 'test'
+  location: '/work/notify/test/quiet.test.js:9:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    
+    false !== true
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (/work/notify/test/quiet.test.js:10:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: midday is not quiet
+ok 3 - midday is not quiet
+  ---
+  duration_ms: 0.226802
+  type: 'test'
+  ...
+# Subtest: reminder is lead minutes before start
+ok 4 - reminder is lead minutes before start
+  ---
+  duration_ms: 1.433313
+  type: 'test'
+  ...
+# Subtest: only upcoming events inside the lead window are due
+ok 5 - only upcoming events inside the lead window are due
+  ---
+  duration_ms: 0.453861
+  type: 'test'
+  ...
+1..5
+# tests 5
+# suites 0
+# pass 3
+# fail 2
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 102.516156

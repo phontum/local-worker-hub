@@ -210,7 +210,7 @@ def investigate_job(tmp_path, repo, task, **kw):
 async def test_investigate_reads_chosen_ranges_with_evidence_and_answers(tmp_path, repo, monkeypatch):
     directory = investigate_job(tmp_path, repo, 'What is `answer` in app.ts?')
     outputs = [{'ranges': [{'path': 'app.ts', 'start': 1, 'end': 5}, {'path': '../etc/passwd', 'start': 1, 'end': 3}]},
-               {'answer': 'answer is 41 (app.ts:1).', 'complete': True, 'more': []}]
+               {'answer': 'answer is 41 (app.ts:1).', 'refs': [{'path': 'app.ts', 'line': 1, 'note': 'the constant'}], 'complete': True, 'more': []}]
     prompts = []
     async def call(client, d, label, name, step, body, event):
         prompts.append(body['messages'][1]['content']); return {'message': {'content': json.dumps(outputs.pop(0))}}
@@ -221,6 +221,28 @@ async def test_investigate_reads_chosen_ranges_with_evidence_and_answers(tmp_pat
     assert report['status'] == 'COMPLETE' and 'app.ts:1' in report['findings'] and 'Unread: ../etc/passwd' in report['risks']
     assert any(e['kind'] == 'read' and e['data']['evidence_id'] for e in events) and any(e['kind'] == 'read_missing' for e in events)
     assert 'Search hits' in prompts[0] and 'export const answer = 41' in prompts[1]
+    assert '- app.ts:1 — the constant' in report['findings'] and 'host-verified' in report['findings']
+
+async def answer_with(tmp_path, repo, monkeypatch, finding):
+    directory = investigate_job(tmp_path, repo, 'What is `answer` in app.ts?')
+    outputs = [{'ranges': [{'path': 'app.ts', 'start': 1, 'end': 1}]}, finding]
+    async def call(client, d, label, name, step, body, event):
+        return {'message': {'content': json.dumps(outputs.pop(0))}}
+    monkeypatch.setattr(calls, 'call', call)
+    await pipelines.run_investigate(directory, 'work', 'Task:\nWhat is `answer` in app.ts?')
+    return final_report(json.loads((directory / 'work.session.json').read_text()))
+
+@pytest.mark.asyncio
+async def test_investigate_drops_references_to_lines_never_read(tmp_path, repo, monkeypatch):
+    report = await answer_with(tmp_path, repo, monkeypatch, {'answer': 'It is 41.', 'complete': True, 'more': [], 'refs': [
+        {'path': 'app.ts', 'line': 1, 'note': 'read'}, {'path': 'app.ts', 'line': 99, 'note': 'invented'}, {'path': 'ghost.ts', 'line': 3, 'note': 'unread'}]})
+    assert report['status'] == 'COMPLETE' and '- app.ts:1' in report['findings'] and 'app.ts:99' not in report['findings']
+    assert 'Unverified references dropped' in report['risks'] and 'app.ts:99' in report['risks'] and 'ghost.ts:3' in report['risks']
+
+@pytest.mark.asyncio
+async def test_investigate_without_a_verified_reference_is_never_complete(tmp_path, repo, monkeypatch):
+    report = await answer_with(tmp_path, repo, monkeypatch, {'answer': 'It is 41.', 'complete': True, 'more': [], 'refs': [{'path': 'app.ts', 'line': 99, 'note': 'invented'}]})
+    assert report['status'] == 'PARTIAL' and 'No host-verified path:line reference' in report['risks']
 
 @pytest.mark.asyncio
 async def test_edit_pipeline_applies_blocks_and_retries_once_with_the_exact_failure(tmp_path, repo, monkeypatch):
@@ -302,3 +324,29 @@ async def test_a_bare_boolean_answer_is_retried_once_and_then_reported_as_partia
     await ask.run_ask(directory, 'work', 'Thanks!')
     stuck = final_report(json.loads((directory / 'work.session.json').read_text()))
     assert stuck['status'] == 'PARTIAL' and 'true' not in stuck['findings'].lower().split('could not')[0]
+
+@pytest.mark.asyncio
+async def test_investigate_harvests_verifiable_citations_from_the_answer_text(tmp_path, repo, monkeypatch):
+    report = await answer_with(tmp_path, repo, monkeypatch, {'answer': 'It is 41 [E3:1] and also app.ts:1, but not app.ts:77.', 'complete': True, 'more': [], 'refs': []})
+    assert report['status'] == 'COMPLETE' and report['findings'].count('- app.ts:1 —') == 1 and 'app.ts:77' not in report['risks']
+
+@pytest.mark.asyncio
+async def test_investigate_accepts_an_evidence_label_written_as_the_path(tmp_path, repo, monkeypatch):
+    report = await answer_with(tmp_path, repo, monkeypatch, {'answer': 'It is 41.', 'complete': True, 'more': [], 'refs': [{'path': 'E3', 'line': 1, 'note': 'label used as path'}]})  # E1 and E2 are the identifier searches
+    assert report['status'] == 'COMPLETE' and '- app.ts:1 — label used as path' in report['findings']
+
+@pytest.mark.asyncio
+async def test_investigate_derives_the_line_of_code_the_answer_quotes(tmp_path, repo, monkeypatch):
+    report = await answer_with(tmp_path, repo, monkeypatch, {'answer': 'The value is set by `export const answer = 41` and a made-up `return nonsense(42)`.', 'complete': True, 'more': [], 'refs': []})
+    assert report['status'] == 'COMPLETE' and '- app.ts:1 — quoted in the answer' in report['findings'] and 'nonsense' not in report['risks']
+
+@pytest.mark.asyncio
+async def test_short_backtick_spans_do_not_misalign_the_quoted_code_pairing(tmp_path, repo, monkeypatch):
+    answer = 'The `answer` constant is defined as `export const answer = 41` here, and a note: `x`.'
+    report = await answer_with(tmp_path, repo, monkeypatch, {'answer': answer, 'complete': True, 'more': [], 'refs': []})
+    assert report['status'] == 'COMPLETE' and '- app.ts:1 — quoted in the answer' in report['findings']
+
+@pytest.mark.asyncio
+async def test_investigate_harvests_citations_worded_as_a_file_and_line(tmp_path, repo, monkeypatch):
+    report = await answer_with(tmp_path, repo, monkeypatch, {'answer': 'The constant is defined in app.ts at line 1 and nowhere else (app.ts line 90 is made up).', 'complete': True, 'more': [], 'refs': []})
+    assert report['status'] == 'COMPLETE' and '- app.ts:1 —' in report['findings'] and 'app.ts:90' not in report['findings']

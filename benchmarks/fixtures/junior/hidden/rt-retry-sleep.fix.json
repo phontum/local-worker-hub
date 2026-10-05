@@ -1,0 +1,1 @@
+{"path": "retry.py", "search": "            sleep(backoff * attempt)", "replace": "            if attempt < attempts:\n                sleep(backoff * attempt)"}

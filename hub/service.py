@@ -18,6 +18,8 @@ from fastapi.staticfiles import StaticFiles
 from .models import JobRequest, Review
 from .settings import initialize, STATE, PROJECT
 from .model_registry import model_name, allowed_names, models as registered_models, probe, OLLAMA
+from . import workspace
+from .scoped import ScopeError
 from .store import Store
 from .runner import Runner, stop_process
 from .presentation import result_summary, result_brief, progress_summary, history_item
@@ -31,7 +33,7 @@ class AnalysisRequest(BaseModel):
 
 
 def artifact_path(ident, name):
-    allowed={'ask.json','report.txt','draft-report.txt','answer-review.json','work.web-verification.json','answer-review.web-verification.json','work.research-plan.json','answer-review.research-plan.json','scoped-diff.txt','before-status.txt','after-status.txt','before-diff.txt','after-diff.txt','before-staged.txt','after-staged.txt'}
+    allowed={'ask.json','report.txt','draft-report.txt','answer-review.json','work.web-verification.json','answer-review.web-verification.json','work.research-plan.json','answer-review.research-plan.json','scoped-diff.txt','patch.diff','before-status.txt','after-status.txt','before-diff.txt','after-diff.txt','before-staged.txt','after-staged.txt'}
     if name not in allowed and not re.fullmatch(r'check-(?:\d+-)?\d+\.log',name) and not re.fullmatch(r'board-[a-z0-9.-]+\.(?:json|txt)',name):
         raise HTTPException(403,'Only reports, diffs and check outputs are exposed')
     path=STATE/'jobs'/ident/name
@@ -246,6 +248,25 @@ def create_app(store=None, start_workers=True):
         job(ident)
         try:return store.review(ident,request)
         except ValueError as e:raise HTTPException(409,str(e))
+
+    @app.post('/api/jobs/{ident}/apply',dependencies=[Depends(auth)])
+    def apply_result(ident:str):
+        record=job(ident)
+        if record['request']['role']!='editor' or record['state'] in ('queued','running'):raise HTTPException(409,'Apply needs a finished Editor job')
+        try:value=workspace.apply(ident)
+        except workspace.WorkspaceError as e:raise HTTPException(409,str(e))
+        except ScopeError as e:raise HTTPException(403,str(e))
+        store.event(ident,'workspace-'+value['state'],{k:value[k] for k in ('applied','conflicts')})
+        return value
+
+    @app.post('/api/jobs/{ident}/discard',dependencies=[Depends(auth)])
+    def discard_result(ident:str):
+        record=job(ident)
+        if record['request']['role']!='editor' or record['state'] in ('queued','running'):raise HTTPException(409,'Discard needs a finished Editor job')
+        try:value=workspace.discard(ident)
+        except workspace.WorkspaceError as e:raise HTTPException(409,str(e))
+        store.event(ident,'workspace-'+value['state'],{})
+        return value
 
     @app.get('/api/jobs/{ident}/artifacts/{name}',dependencies=[Depends(auth)])
     def artifact(ident:str,name:str):

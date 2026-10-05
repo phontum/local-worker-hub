@@ -108,16 +108,19 @@ def search_hits(files, task, limit=40):
                 return '\n'.join(lines)
     return '\n'.join(lines)
 
-def read_ranges(files, ranges, limit=6):
-    """Read the chosen ranges through the scoped reader; returns prompt text and failures."""
-    blocks, errors = [], []
+def read_ranges(files, ranges, limit=6, budget=None):
+    """Read the chosen ranges through the scoped reader; returns prompt text and failures. `budget` caps the prompt characters."""
+    blocks, errors, used = [], [], 0
     for item in ranges[:limit]:
+        if budget is not None and used >= budget:
+            break
         path = str(item.get('path', '')).strip()
         start = max(1, int(item.get('start') or 1))
         end = max(start, int(item.get('end') or start + 79))
         try:
             value = json.loads(files.read_file(path, start=start, lines=min(120, end - start + 1)))
             blocks.append(f"[{value['evidence_id']}] {value['path']} lines {start}-{start + len(value['content'].splitlines()) - 1} of {value['total_lines']}\n{value['content']}")
+            used += len(blocks[-1])
         except Exception as error:
             files.audit('read_missing', {'path': path, 'error': str(error)[:250]})
             errors.append(f'{path}: {str(error)[:160]}')

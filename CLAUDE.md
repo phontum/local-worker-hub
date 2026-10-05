@@ -26,6 +26,8 @@ files. After two unsuccessful local attempts, take over.
 - `hub/cli.py`, `hub/mcp_adapter.py`: user and frontier interfaces.
 - `hub/service.py`, `hub/store.py`: authenticated localhost API, queue and history.
 - `hub/runner.py`, `hub/engine.py`: role workflows and bounded model execution.
+- `hub/codeindex.py`, `hub/workspace.py`, `hub/acceptance.py`, `hub/testparse.py`: deterministic code index and candidate ranking,
+  private editor workspace with guarded apply, the acceptance packet, and parsing of test/lint output into failures.
 - `hub/scoped.py`, `hub/evidence.py`: scoped tools and freshness/provenance checks.
 - `hub/public_page.py`, `hub/web_provider.py`, `hub/web_verification.py`: public
   retrieval, search-provider adapters and current-source verification.
@@ -38,9 +40,9 @@ files. After two unsuccessful local attempts, take over.
 
 ## Boundaries to preserve
 
-- Default model is Gemma 4 12B (`gemma4:12b-it-qat`), chosen without a head-to-head
-  comparison against Qwen3.5 9B; compare before relying on it. 16K context and concurrency
-  one; 32K is opt-in. Only one model is resident at a time (`OLLAMA_MAX_LOADED_MODELS=1`);
+- Default model is Gemma 4 12B (`gemma4:12b-it-qat`); the junior-task eval (`benchmarks/eval_junior.py`, results in
+  `benchmarks/RESULTS.md`) put it ahead of Qwen3.5 9B (90.9% vs 78.8% correct, 3 vs 11 COMPLETE-but-wrong) on two small fixtures; re-run it
+  before changing the default. 16K context and concurrency one; 32K is opt-in. Only one model is resident at a time (`OLLAMA_MAX_LOADED_MODELS=1`);
   model names live in `hub/model_registry.py`. Do not promote experimental settings without
   measured evaluation.
 - Default paths are host-driven pipelines without tool calling (docs/WORKFLOWS.md): ask
@@ -52,8 +54,9 @@ files. After two unsuccessful local attempts, take over.
 - `--board` is opt-in and rarely useful (see docs/WORKFLOWS.md). Proposers are tools-off and
   never see each other; no phase combines repository and web access. Preserve the literal
   task-quote anchors, host-computed drift report and shared web ledger. No critic or repair.
-- Investigator reads are scoped. Editor writes require exact authorized paths
-  and fresh observed source. Preserve symlink, hardlink and secret-file guards.
+- Investigator reads are scoped, and its `path:line` references are verified by the host against lines it read. Editor writes require exact
+  authorized paths and fresh observed source, and land in a private workspace; only `apply_result` writes the user's tree, and only if the
+  authorized files are unchanged there. Preserve symlink, hardlink and secret-file guards.
 - Validator executes only explicitly approved argv checks. It uses zero model
   tokens by default. Approved programs are trusted execution, not an OS sandbox;
   never disguise installs, migrations, deployment or destructive work as checks.

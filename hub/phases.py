@@ -28,7 +28,7 @@ def resolve_phase(request, profiles, phase, report_only=False):
     """Phase profile overrides role profile; the request overrides both for context and thinking.
 
     Mirrors the previously inline engine rules exactly. A profile may name a registered model
-    alias; the default stays Qwen.
+    alias; the default is Gemma 4 12B (see benchmarks/RESULTS.md).
     """
     fallback = profiles.get('investigator', {}) if phase == 'investigate' else profiles.get(request.role, {}) if phase in ('work', 'edit') else {}
     profile = profiles.get(phase, fallback)

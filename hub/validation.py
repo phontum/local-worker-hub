@@ -2,6 +2,7 @@
 import json
 import re
 from .report import parse_report
+from .testparse import parse as parse_output
 
 
 def tail(path, limit=10000):
@@ -34,6 +35,28 @@ def test_counts(text):
     return None
 
 
+def parsed_output(output, argv=None, root=None):
+    """Counts (only when the older summary parsers do not know the format) and structured failures from check output."""
+    found = parse_output(output, argv, root)
+    counts = test_counts(output)
+    if counts is None and found['tool'] == 'pytest' and found['counts']:
+        c = found['counts']; failed_n = c.get('failed', 0) + c.get('error', 0)
+        counts = {'total': sum(c.values()), 'passed': c.get('passed', 0), 'failed': failed_n, 'skipped': c.get('skipped', 0), 'format': 'pytest'}
+    return counts, found['failures']
+
+
+def failure_lines(check, limit=10, width=160):
+    """One line per parsed failure: test id, file:line, first assertion text."""
+    rows = check.get('failures') or []
+    lines = []
+    for f in rows[:limit]:
+        where = f"{f['file']}:{f['line']}" if f.get('file') and f.get('line') else (f.get('file') or '')
+        lines.append(f"  FAIL {f['test_id']}" + (f' ({where})' if where else '') + (' — ' + f['message'][:width] if f.get('message') else ''))
+    if len(rows) > limit:
+        lines.append(f'  ... {len(rows) - limit} more failures in the artifact')
+    return lines
+
+
 def failed(check):
     return check.get('status') in ('failed','blocked','skipped','cancelled') or check.get('exit_code') != 0 or check.get('timed_out', False)
 
@@ -47,6 +70,7 @@ def direct_report(checks):
         if c.get('counts'): line += ' ' + json.dumps(c['counts'])
         line += f"; exit={c.get('exit_code')}; artifact={c.get('artifact') or 'None'}"
         descriptions.append(line)
+        descriptions.extend(failure_lines(c))
     report = ('LOCAL_WORKER_REPORT\nStatus: '+status+'\nFindings:\nRecorded command outcomes; no model inference.\n'
               'Files:\nNone edited by the helper. Trusted checks may produce artifacts.\nChecks:\n'+
               ('\n'.join(descriptions) or 'Not run.')+'\nRisks:\n'+
@@ -56,8 +80,11 @@ def direct_report(checks):
 
 
 def analysis_evidence(checks, budget=12000):
-    compact = [{k:v for k,v in c.items() if k not in ('output_tail','argv','cwd')} for c in checks]
+    compact = [{k:v for k,v in c.items() if k not in ('output_tail','argv','cwd','failures')} for c in checks]
     text = json.dumps(compact, ensure_ascii=True)
     for c in checks:
-        if failed(c): text += '\n'+c['name']+' recorded log excerpt:\n'+c.get('output_tail','')[:3000]
+        if failed(c):
+            parsed = failure_lines(c, limit=20, width=300)
+            # Parsed failures say what broke; keep only a short raw tail beside them.
+            text += '\n'+c['name']+(' parsed failures:\n'+'\n'.join(parsed)+'\n' if parsed else '')+' recorded log excerpt:\n'+c.get('output_tail','')[-(1500 if parsed else 3000):]
     return text[:budget] + '\n[Evidence excerpt is bounded; saved logs are authoritative. Omitted logs were not inspected.]'

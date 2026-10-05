@@ -1,0 +1,1 @@
+{"path": "cache.py", "search": "        return len(self._items)", "replace": "        return sum(1 for _, expires in self._items.values() if self.clock() <= expires)"}

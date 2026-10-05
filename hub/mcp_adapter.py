@@ -22,18 +22,18 @@ def create_server():
                    timeout: int | None=None, summary_mode: str='none', failure_policy: str='fail_fast',
                    profile_hash: str | None=None, profile_ref: str | None=None,
                    check_groups: list[str] | None=None, parameters: dict[str,str] | None=None,
-                   workflow: str='single', repair_attempts: int=0, investigate_first: bool=False,
+                   workflow: str='single', repair_attempts: int=0, investigate_first: bool=False, in_place: bool=False, kind: str | None=None,
                    model_context: int | None=None, model_thinking: bool | None=None,
                    execution_preset: str | None=None, read_paths: list[str] | None=None,
                    evidence_job_ids: list[str] | None=None, handoff_id: str | None=None,
                    review_pass: bool | None=None, board: bool=False, board_mode: str | None=None, verify: bool=False, agent_loop: bool=False, model: str | None=None) -> dict:
-        """Submit a bounded local task. Researcher accepts only a sanitized public brief; Editor requires exact file scope. Reuse the same key only for transport retries. Public web roles answer in plain language by default (about 30-60s). verify=true runs strict origin-proof research (slower, may end PARTIAL). board=true is a rarely useful anonymous multi-model deliberation (slower, FIFO queue); skip it when the task is already specified. The call returns immediately: continue other work, then poll get_job (it reports eta_seconds and queue wait) and read get_result."""
+        """Submit a bounded local task. Researcher accepts only a sanitized public brief; Editor requires exact file scope and works in a private copy of the repository (in_place=true edits it directly): review the patch and acceptance packet, then call apply_result or discard_result. kind names the delegation shape (find_code, explain, config_use, compare, check_requirement, mechanical, guard, regression_test, run_tests, fix_test): it checks the role, tunes the answer format and sets defaults (fix_test uses the implement workflow with one repair; regression_test requires the check that runs the new test and verifies that the test fails on the current code). Reuse the same key only for transport retries. Public web roles answer in plain language by default (about 30-60s). verify=true runs strict origin-proof research (slower, may end PARTIAL). board=true is a rarely useful anonymous multi-model deliberation (slower, FIFO queue); skip it when the task is already specified. The call returns immediately: continue other work, then poll get_job (it reports eta_seconds and queue wait) and read get_result."""
         request=JobRequest(role=role,task=task,repo=repo,allowed_paths=allowed_paths or [],checks=checks or [],
             context=context,caller=caller,caller_session=caller_session,idempotency_key=idempotency_key,
             timeout=timeout if timeout is not None else default_timeout(role,execution_preset,board,verify,bool(review_pass)),
             summary_mode=summary_mode,failure_policy=failure_policy,profile_hash=profile_hash,profile_ref=profile_ref,
             check_groups=check_groups or [],parameters=parameters or {},workflow=workflow,
-            repair_attempts=repair_attempts,investigate_first=investigate_first,
+            repair_attempts=repair_attempts,investigate_first=investigate_first,in_place=in_place,kind=kind,
             model_context=model_context,model_thinking=model_thinking,execution_preset=execution_preset,review_pass=review_pass,
             read_paths=read_paths or [],evidence_job_ids=evidence_job_ids or [],handoff_id=handoff_id,board=board,board_mode=board_mode,verify=verify,agent_loop=agent_loop,model=model)
         result=call('POST','/api/jobs',request.model_dump())
@@ -78,6 +78,17 @@ def create_server():
     def summarize_result(job_id: str, idempotency_key: str, timeout: int=120) -> dict:
         """Queue optional tools-disabled local analysis of saved check evidence. Creates a linked job; never reruns commands or replaces the original result."""
         return call('POST',job_path(job_id)+'/summarize',{'idempotency_key':idempotency_key,'timeout':timeout,'caller':'mcp'})
+
+    @server.tool(annotations=WRITE)
+    def apply_result(job_id: str) -> dict:
+        """Apply a finished Editor job's patch to the repository. The worker edits a private copy; this writes only the authorized files, and
+        refuses (listing conflicts) if any of them changed in the repository since the job started. Review patch.diff and the acceptance packet first."""
+        return call('POST',job_path(job_id)+'/apply')
+
+    @server.tool(annotations=WRITE)
+    def discard_result(job_id: str) -> dict:
+        """Delete a finished Editor job's private workspace without applying it. The patch and report stay readable."""
+        return call('POST',job_path(job_id)+'/discard')
 
     @server.tool(annotations=WRITE)
     def cancel_job(job_id: str) -> dict:

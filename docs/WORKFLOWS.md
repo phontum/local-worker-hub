@@ -449,7 +449,8 @@ Browser mutations require a same-origin request, so use the built dashboard, not
 responses under the private state directory, and `--web replay` serves them back without network, so only the model
 varies (`hub/web_fixtures.py`). The harness writes `~/.config/local-worker/web-fixtures.json` (with an expiry) for the
 run, because job processes start with a minimal environment, and restores it afterwards. Job processes load `hub/` code
-per job: do not edit it during a run.
+per job: do not edit it during a run. Code that runs inside the service (`runner.py`, `validation.py`, `presentation.py`) needs
+`systemctl --user restart local-worker-hub.service` to take effect.
 
 `~/.config/local-worker/preferences.json` (optional): `{"units": "metric", "clock": "24h", "timezone": "Europe/Belgrade"}`.
 
@@ -458,13 +459,25 @@ secret and starts a container bound to 127.0.0.1:8888 (JSON on, limiter off). It
 provider. `local-worker web status` checks its health. Some engines (Brave, DuckDuckGo) often refuse self-hosted
 instances; Exa remains the fallback. The strict `--verify` loop keeps using Exa.
 
-**Investigator**, `hub/pipelines.py` and `hub/localize.py`, Agentless-style:
+**Investigator**, `hub/pipelines.py`, `hub/codeindex.py`, `hub/localize.py`:
 
-- The host builds a repository map (files and top-level symbols) and runs literal searches for identifiers named in the task.
-- The model picks up to six line ranges; the host reads them through the scoped reader, which keeps evidence IDs and guards.
-- The model answers and may ask for one more read round.
+- The host keeps a deterministic code index per repository (`hub/codeindex.py`, cached in the private state directory by file
+  mtime and size): definitions with line spans, imports (resolved to repository files for Python and JavaScript/TypeScript) and
+  an identifier word table. Python uses `ast`; JavaScript, TypeScript, Go and Rust use tree-sitter; everything is built through
+  the scoped inventory, so secret files, symlinks and excluded directories never enter it.
+- For a task, `candidates()` ranks where to read: definitions whose name words match the task (rarer words weigh more, test files
+  count less), exact identifiers named in the task and where they occur, identifiers that contain a task word (`timeout_s` for
+  "timeout"), the places that use those definitions and the files that import them. A file named in the task (a requirements
+  document, a config file) contributes its own terms as extra seeds.
+- The model sees the ranked candidates, a smaller repository map and search hits, and picks up to six ranges. The host also reads
+  its own best candidates (quota per kind, bounded total size), so recall does not depend on the model choosing the right files.
+- The model answers with `refs` (path, line, note) and may ask for one more read round. The host verifies every reference against
+  the lines it actually returned, also harvests `[E3:19]` or `path:line` citations and quoted code from the prose when the model left
+  `refs` empty, drops what it cannot verify (named under Risks) and renders only verified lines as `Evidence (host-verified ...)`.
+  COMPLETE needs at least one verified reference and the model's own `complete` flag; otherwise PARTIAL.
+- If the index fails the older map and literal search still run.
 
-**Editor**, `hub/textedit.py`, aider-style:
+**Editor**, `hub/textedit.py`, `hub/workspace.py`, `hub/acceptance.py`, aider-style:
 
 - The host puts the authorized files in the prompt (regions around named identifiers for files over 400 lines).
 - The model replies with `FILE:` plus SEARCH/REPLACE blocks, or WHOLE blocks for small or new files.
@@ -472,12 +485,29 @@ instances; Exa remains the fallback. The strict `--verify` loop keeps using Exa.
 - Ambiguous or missing matches get one corrective turn with the exact error.
 - Writes go through `ScopedFiles` (exact paths, symlink, hardlink, secret and freshness checks against the hash taken
   when the host read the file).
+- **Private workspace (default).** The worker edits and runs its checks in `STATE/workspaces/<job>`, a copy of the repository as it is
+  now: tracked and untracked-but-not-ignored files, uncommitted changes included, secret files left out, `node_modules`/`.venv`
+  linked. A private git repository there (never your `.git`) makes the patch exact. Your tree is not touched while the job runs.
+  `--in-place` (`in_place` over MCP) keeps the older direct editing.
+- **Acceptance packet** (`result.acceptance`, `patch.diff`): files and lines changed, scope respected (nothing tracked changed outside
+  the authorized paths), checks with parsed failures, attempts and whether the repair was used, a host-derived review focus
+  (source changed without a test, no check ran, new definitions, large change) and `next_action`. It is
+  `review_patch_then_apply_result` only for COMPLETE with a diff, passing checks and no scope escape.
+- **Apply or discard.** `local-worker apply JOB` / `discard JOB` (MCP `apply_result`, `discard_result`): apply writes only the
+  authorized files, and refuses with a conflict list if any of them changed in your tree since the job started (it compares file
+  hashes taken at the snapshot). It never writes through a symlink or into secret files. Trees expire after seven days; the report
+  and patch stay readable. `record_review` remains the acceptance log.
 
-## Coding: checks decide
+**Test output**, `hub/testparse.py`: check output from pytest, vitest, node:test, tsc, ruff, mypy and eslint is parsed on the host into
+failures (test id, file, line, assertion text) and counts. A validator job without a model summary therefore reports which tests failed
+and where, at zero tokens; the repair turn of the implement workflow sees the parsed failures and a short raw tail instead of a long tail.
+Unknown formats stay raw. ruff, mypy and eslint parsing follows their documented formats and has not been run against recorded output here.
 
-`--workflow implement` runs the edit, then the approved checks. Passing checks with a real diff mean COMPLETE; the
-local review runs only with `--review` and its findings are advisory notes. A failed check triggers one targeted
-repair (`--repair-attempts`) fed with the failing output, through the same text edit protocol.
+**Junior-task evaluation**: `benchmarks/eval_junior.py` runs 22 cases over the ten delegation shapes (find code, explain, config use,
+mechanical change, guard, regression test, run tests, fix an exact failing test, compare, check a requirement) on two small fixture
+projects, graded mechanically (gold `path:line` references, hidden checks the worker never sees, a regression test must fail on
+the bug and pass with a reference fix). The model is chosen per request and verified from the job's effective-config events;
+`--compare A B` applies the pre-registered decision rule. Results are in `benchmarks/RESULTS.md`.
 
 ## Hardware and runtime notes
 

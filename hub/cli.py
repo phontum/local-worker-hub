@@ -107,6 +107,13 @@ def main():
         args=p.parse_args()
         from .mcp_adapter import job_path
         print(json.dumps(call('POST',job_path(args.job_id)+'/summarize',{'idempotency_key':args.idempotency_key,'timeout':args.timeout,'caller':'cli'}),indent=2));return
+    if command in ('apply','discard'):
+        p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('job_id')
+        args=p.parse_args()
+        from .mcp_adapter import job_path
+        try:print(json.dumps(call('POST',job_path(args.job_id)+'/'+command),indent=2))
+        except Exception as e:print(str(e),file=sys.stderr);sys.exit(2)
+        return
     if command in ('status','result','cancel','review','wait'):
         p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('job_id');p.add_argument('decision',nargs='?');p.add_argument('--notes',default='')
         p.add_argument('--full',action='store_true');p.add_argument('--measurement-source',choices=['measured','manual_estimate'],default='measured')
@@ -196,7 +203,7 @@ def main():
     p.add_argument('--failure-policy',choices=['fail_fast','continue_independent'],default='fail_fast')
     p.add_argument('--profile-hash');p.add_argument('--check-group',action='append',default=[])
     p.add_argument('--profile-ref');p.add_argument('--workflow',choices=['single','implement'],default='single')
-    p.add_argument('--repair-attempts',type=int,default=0);p.add_argument('--investigate-first',action='store_true')
+    p.add_argument('--repair-attempts',type=int,default=0);p.add_argument('--investigate-first',action='store_true');p.add_argument('--in-place',action='store_true',help='Edit the repository directly instead of a private workspace');p.add_argument('--kind',choices=['find_code','explain','config_use','compare','check_requirement','mechanical','guard','regression_test','run_tests','fix_test'],help='Delegation shape: checks the role and tunes defaults')
     p.add_argument('--model',help='Local model alias from the registry for every phase of this job (default: roles.json)')
     p.add_argument('--model-context',type=int,choices=[16384,32768]);p.add_argument('--model-thinking',choices=['on','off'])
     p.add_argument('--board',action='store_true',help='Rarely useful: deliberate with an anonymous multi-model board before answering (public web roles; 300s budget, slower)')
@@ -226,7 +233,7 @@ def main():
             timeout=args.timeout if args.timeout is not None else default_timeout(role,preset,args.board,args.verify,bool(args.review_pass)),no_recovery=args.no_recovery,caller=args.caller,caller_session=args.caller_session,
             idempotency_key=args.idempotency_key or uuid.uuid4().hex,summary_mode=args.summary_mode,failure_policy=args.failure_policy,
             profile_hash=args.profile_hash,profile_ref=args.profile_ref,check_groups=args.check_group,parameters=parameters,
-            workflow=args.workflow,repair_attempts=args.repair_attempts,investigate_first=args.investigate_first,
+            workflow=args.workflow,repair_attempts=args.repair_attempts,investigate_first=args.investigate_first,in_place=args.in_place,kind=args.kind,
             model=args.model,model_context=args.model_context,model_thinking=None if args.model_thinking is None else args.model_thinking=='on',
             execution_preset=preset,review_pass=args.review_pass,read_paths=args.read_path,evidence_job_ids=args.evidence_job,handoff_id=args.handoff_id,board=args.board,board_mode=args.board_mode,verify=args.verify,agent_loop=args.agent_loop)
     except Exception as e:p.error(str(e))

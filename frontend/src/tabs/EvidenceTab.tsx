@@ -5,7 +5,7 @@ import { WebLookup } from './WebLookup';
 export function EvidenceTab({ job, events }: { job: Job; events: Event[] }) {
   const r = job.result;
   const plans = events.filter(e => e.kind === 'web_research_plan');
-  const empty = !r?.ask && !r?.answer_review && !r?.web_verification && !plans.length && !r?.checks?.length && !r?.attempts?.length && !r?.changed_files?.length;
+  const empty = !r?.ask && !r?.answer_review && !r?.web_verification && !plans.length && !r?.checks?.length && !r?.acceptance && !r?.attempts?.length && !r?.changed_files?.length;
   return <>
     {empty && <p className="muted">No separate evidence was recorded for this task.</p>}
     {r?.ask && <WebLookup jobId={job.id} ask={r.ask} />}
@@ -23,7 +23,14 @@ export function EvidenceTab({ job, events }: { job: Job; events: Event[] }) {
       <p>Strategy</p><ol>{(e.data.strategy ?? []).map((s: string, n: number) => <li key={n}>{s}</li>)}</ol>
       <p>Output: {String(e.data.result_format ?? '')}</p><p>Stop: {String(e.data.stop_when ?? '')}</p></details>)}
       {r?.research_plans?.map(name => <p key={name}><a href={artifactUrl(job.id, name)}>{name === 'work.research-plan.json' ? 'Initial plan JSON' : 'Reviewer plan JSON'}</a></p>)}</>}
-    {!!r?.checks?.length && <><h3>Check outcomes</h3>{r.checks.map((c, i) => <CheckOutput key={`${job.id}-${i}`} jobId={r.source_job_id ?? job.id} check={c} />)}</>}
+    {!!r?.checks?.length && <><h3>Check outcomes</h3>{r.checks.map((c, i) => <div key={`${job.id}-${i}`}><CheckOutput jobId={r.source_job_id ?? job.id} check={c} />
+      {!!c.failures?.length && <ul className="failures">{c.failures.map((f, n) => <li key={n}><strong>{f.test_id}</strong>{f.file && <> · {f.file}{f.line ? `:${f.line}` : ''}</>}{f.message && <p>{f.message}</p>}</li>)}</ul>}</div>)}</>}
+    {r?.acceptance && <><h3>Acceptance packet</h3>
+      <p>{r.acceptance.diff.files} file(s) · +{r.acceptance.diff.added} −{r.acceptance.diff.removed} · scope {r.acceptance.scope_ok ? 'respected' : `violated (${r.acceptance.outside_scope.join(', ')})`} · workspace {r.workspace?.state}
+        {r.workspace && <> · your tree {r.workspace.origin_unchanged ? 'untouched' : 'changed'}</>} · next: {r.acceptance.next_action.replaceAll('_', ' ')}</p>
+      {r.acceptance.remaining_issue && <p>Remaining: {r.acceptance.remaining_issue}</p>}
+      {!!r.acceptance.review_focus.length && <><p>Review focus</p><ul>{r.acceptance.review_focus.map((note, i) => <li key={i}>{note}</li>)}</ul></>}
+      <p className="line"><a href={artifactUrl(job.id, 'patch.diff')}>Patch</a></p></>}
     {!!r?.attempts?.length && <><h3>Local attempts</h3><ol className="timeline">{r.attempts.map(a => <li key={a.attempt}><b>Attempt {a.attempt + 1} · review {a.review_status}</b>
       {a.review_findings && <p>{a.review_findings}</p>}<p>{a.checks.map(c => `${c.name}: ${c.status}`).join(' · ')}</p></li>)}</ol></>}
     {!!r?.changed_files?.length && <p className="line"><a href={artifactUrl(job.id, 'after-diff.txt')}>Download diff</a>{job.request.role === 'editor' && <> · <a href={artifactUrl(job.id, 'scoped-diff.txt')}>Authorized-file diff</a></>}</p>}

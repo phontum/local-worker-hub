@@ -1,0 +1,35 @@
+
+ RUN  v3.2.7 /work/ts
+
+ ❯ sum.test.ts (2 tests | 1 failed) 8ms
+   × sum > adds 7ms
+     → expected 2 to be 3 // Object.is equality
+   ✓ sum > ok 1ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  sum.test.ts > sum > adds
+AssertionError: expected 2 to be 3 // Object.is equality
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 3[39m
+[31m+ 2[39m
+
+ ❯ sum.test.ts:3:38
+      1| import { test, expect, describe } from 'vitest';
+      2| describe('sum', () => {
+      3|   test('adds', () => { expect(1 + 1).toBe(3); });
+       |                                      ^
+      4|   test('ok', () => { expect(2).toBe(2); });
+      5| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 1 passed (2)
+   Start at  12:29:29
+   Duration  536ms (transform 156ms, setup 0ms, collect 134ms, tests 8ms, environment 0ms, prepare 107ms)
+

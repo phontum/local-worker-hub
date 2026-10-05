@@ -37,6 +37,8 @@ class JobRequest(BaseModel):
     workflow: Literal['single', 'implement'] = 'single'
     repair_attempts: int = Field(default=0, ge=0, le=2)
     investigate_first: bool = False
+    in_place: bool = False
+    kind: Literal['find_code', 'explain', 'config_use', 'compare', 'check_requirement', 'mechanical', 'guard', 'regression_test', 'run_tests', 'fix_test'] | None = None
     model_context: Literal[16384, 32768] | None = None
     model_thinking: bool | None = None
     review_pass: bool | None = None
@@ -102,6 +104,16 @@ class JobRequest(BaseModel):
             raise ValueError('Implement workflow requires Editor and exact allowed_paths')
         if self.workflow == 'implement' and not (self.checks or self.profile_hash or self.profile_ref):
             raise ValueError('Implement workflow requires supplied validation checks')
+        if self.in_place and self.role != 'editor': raise ValueError('in_place applies to Editor only')
+        if self.kind:
+            wanted = {'find_code': 'investigator', 'explain': 'investigator', 'config_use': 'investigator', 'compare': 'investigator', 'check_requirement': 'investigator',
+                      'mechanical': 'editor', 'guard': 'editor', 'regression_test': 'editor', 'fix_test': 'editor', 'run_tests': 'validator'}[self.kind]
+            if self.role != wanted: raise ValueError(f'kind {self.kind} runs as {wanted}')
+            if self.kind == 'regression_test' and not (self.checks or self.profile_hash or self.profile_ref): raise ValueError('regression_test requires the check that runs the new test')
+            if self.kind == 'fix_test' and (self.checks or self.profile_hash or self.profile_ref):
+                # A failing test is fixed in the implement workflow with one targeted repair unless the caller chose otherwise.
+                if 'workflow' not in self.model_fields_set: self.workflow = 'implement'
+                if 'repair_attempts' not in self.model_fields_set and self.workflow == 'implement': self.repair_attempts = 1
         if self.workflow == 'single' and (self.repair_attempts or self.investigate_first):
             raise ValueError('Repair and initial investigation require implement workflow')
         if self.allowed_paths and self.role != 'editor': raise ValueError('Only Editor accepts edit scope')
