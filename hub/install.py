@@ -28,11 +28,21 @@ Codex background terminal) prints one compact brief when finished while you keep
 Small tasks that cost more to
 delegate than to do directly should stay with the primary. Never blindly trust a
 COMPLETE report: inspect important evidence and actual diffs, verify relevant
-behavior, then record acceptance/rejection/takeover through record_review.
+behavior, then record acceptance/rejection/takeover through record_review. A rejection or takeover needs notes and a
+reason code (truncated, wrong_edit, oversized, no_change, check_failed, scope, wrong_localization, context_missing, other);
+after you finish your own edits on such a job call record_outcome so the diff you shipped is kept for evaluation. These
+records are what routing advice and any later Editor fine-tuning learn from, so skipping them wastes the data.
 The hub calls Ollama directly through its native chat API: installed OpenCode V2 does not forward
 scoped MCP tools to the model. Do not substitute the permissive legacy agent.
 
 ## What to delegate
+
+Before delegating a lookup, try the deterministic Tier-0 tools (no model call, instant): find_symbol, find_references,
+find_implementations, callers, callees, symbol_context, outline and diagnostics (name-based unless the project profile approves
+a language server; each answer says its precision), recommend_checks for which tests to run, and estimate_delegation for advice on
+whether a task is worth delegating (advisory, prior-dominated until reviews accumulate). For structured handoffs use
+delegate(spec): goal, kind, targets, changes with exact old/new mappings, invariants and acceptance criteria that the host
+verifies after the edit, scope, approved checks.
 
 Prefer the MCP tools investigate_code, implement_change, fix_failing_test, add_regression_test and run_checks: they set the safe defaults. Delegate these constantly, with exact scope: "find all code involved in X" and "where is this config used"
 (Investigator: deterministic code index, host-verified path:line evidence); "read these files and explain how X
@@ -71,10 +81,9 @@ Public questions run a host pipeline: a small decision call, host search (local 
 fallback), live page reads, then an answer from numbered excerpts with host-written sources in
 the user's units (~/.config/local-worker/preferences.json), usually in 10-20 s. Investigators get
 a repo map and search hits; editors reply with SEARCH/REPLACE blocks the host applies under the
-same scope/freshness guards; --agent-loop keeps the older tool loop.
+same scope/freshness guards; --agent-loop keeps the older tool loop for public research only.
 --verify (MCP verify=true) adds strict origin-proof research: slower and often PARTIAL.
---board (MCP board=true) is a rarely useful slow multi-model deliberation with no measured
-benefit; do not use it for specified work, and repository tasks have no board.
+--board was retired (3-4x slower, no measured benefit) and is refused; --agent-loop is refused for repository roles.
 Implementation has no automatic review: passing approved checks decide, --review adds an advisory one;
 direct Validator checks remain zero-token. Local review is not frontier acceptance.
 Public fetch_web defaults to mode=current: bounded direct public origin reads,
