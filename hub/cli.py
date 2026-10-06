@@ -135,18 +135,25 @@ def main():
         p=argparse.ArgumentParser(description='Export delegation records as JSONL (private, local). Structure only by default: hashes, counts, paths, ranges, reason codes.')
         p.add_argument('command');p.add_argument('action',choices=['export']);p.add_argument('--out',required=True);p.add_argument('--since-days',type=int);p.add_argument('--kinds',default='',help='comma-separated job kinds')
         p.add_argument('--include-source',action='store_true',help='ALSO write task text, the exact prompt, the local patch, the final frontier diff and review notes (private source and model output)')
-        p.add_argument('--include-unreviewed',action='store_true');p.add_argument('--include-eval',action='store_true',help='include benchmark jobs')
+        p.add_argument('--include-unreviewed',action='store_true');p.add_argument('--include-eval',action='store_true',help='include benchmark jobs');p.add_argument('--all-history',action='store_true',help='ignore the stats reset')
         args=p.parse_args()
-        query={'kinds':args.kinds,'include_source':str(args.include_source).lower(),'include_unreviewed':str(args.include_unreviewed).lower(),'include_eval':str(args.include_eval).lower()}
+        query={'kinds':args.kinds,'include_source':str(args.include_source).lower(),'include_unreviewed':str(args.include_unreviewed).lower(),'include_eval':str(args.include_eval).lower(),'include_history':str(args.all_history).lower()}
         if args.since_days:query['since_days']=args.since_days
         records=call('GET','/api/dataset?'+urlencode(query))['records']
         out=Path(args.out);out.write_text(''.join(json.dumps(r)+'\n' for r in records));out.chmod(0o600)
         print(f"Wrote {len(records)} record(s) to {out}"+(' (contains private source)' if args.include_source else ' (structure only)'));return
     if command=='stats':
-        p=argparse.ArgumentParser(description='Frontier acceptance by role and kind over reviewed delegations (benchmark jobs excluded).');p.add_argument('command');p.add_argument('--include-eval',action='store_true')
+        p=argparse.ArgumentParser(description='Frontier acceptance by role and kind over reviewed delegations (benchmark jobs excluded, counted from the last reset). `stats reset` starts counting from now; nothing is deleted.')
+        p.add_argument('command');p.add_argument('action',nargs='?',choices=['show','reset'],default='show');p.add_argument('--include-eval',action='store_true');p.add_argument('--all-history',action='store_true',help='ignore the reset and count every job');p.add_argument('--since',help='with reset: start counting at this local date (YYYY-MM-DD, 00:00) instead of now')
         args=p.parse_args()
-        for item in call('GET','/api/outcomes?include_eval='+str(args.include_eval).lower())['by_kind']:
+        if args.action=='reset':
+            begin=time.mktime(time.strptime(args.since,'%Y-%m-%d')) if args.since else None
+            done=call('POST','/api/outcomes/reset',{'since':begin} if begin else {});print(f"Counting from {time.strftime('%Y-%m-%d %H:%M',time.localtime(done['since']))}. {done['kept']} earlier job(s) are kept and still available with --all-history.");return
+        shown=call('GET','/api/outcomes?include_eval='+str(args.include_eval).lower()+'&include_history='+str(args.all_history).lower())
+        print('Counting '+('all history' if shown['since'] is None else 'jobs submitted since '+time.strftime('%Y-%m-%d %H:%M',time.localtime(shown['since']))))
+        for item in shown['by_kind']:
             print(f"{item['role']:<12}{item['kind']:<18}reviewed {item['reviewed']:<4}accepted {item['accepted']:<4}rejected {item['rejected']:<4}takeover {item['takeover']:<4}rate {item['accept_rate']:.0%}  {item['reasons'] or ''}")
+        if not shown['by_kind']:print('No reviewed delegations counted yet.')
         return
     if command=='incident':
         p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('job_id');p.add_argument('--out');p.add_argument('--fixture',metavar='DIR',help='Write a replayable regression fixture (PRIVATE SOURCE and raw model replies) to DIR instead of the metadata-only export');p.add_argument('--include-notes',action='store_true',help='Include the review notes (written by you; check them for private text first)')

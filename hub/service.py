@@ -305,19 +305,27 @@ def create_app(store=None, start_workers=True):
         from .skills.coding.delegation import router
         role=str(body.get('role') or 'editor')
         if role not in ('investigator','editor','validator'):raise HTTPException(409,'role must be investigator, editor or validator')
-        return router.estimate(role,body.get('kind') or None,str(body.get('task') or ''),int(body.get('files') or 0),store.list(100000),bool(body.get('tier0_answerable')),
+        return router.estimate(role,body.get('kind') or None,str(body.get('task') or ''),int(body.get('files') or 0),outcomes.counted(store.list(100000)),bool(body.get('tier0_answerable')),
                                bool(body.get('gate_tripped')),bool(body.get('ambiguous_cause')))
 
     @app.get('/api/dataset',dependencies=[Depends(auth)])
-    def dataset(since_days:int|None=Query(default=None,ge=1,le=3650),kinds:str='',include_source:bool=False,include_unreviewed:bool=False,include_eval:bool=False):
+    def dataset(since_days:int|None=Query(default=None,ge=1,le=3650),kinds:str='',include_source:bool=False,include_unreviewed:bool=False,include_eval:bool=False,include_history:bool=False):
         """Delegation records for later router evaluation, retrieval work or fine-tuning. Structure only unless include_source (private source and model output)."""
         wanted=[k for k in kinds.split(',') if k] or None
-        return {'schema':outcomes.SCHEMA,'records':outcomes.dataset(store.list(100000),since_days,wanted,include_source,include_unreviewed,include_eval)}
+        return {'schema':outcomes.SCHEMA,'records':outcomes.dataset(outcomes.counted(store.list(100000),include_history),since_days,wanted,include_source,include_unreviewed,include_eval)}
 
     @app.get('/api/outcomes',dependencies=[Depends(auth)])
-    def outcome_stats(include_eval:bool=False):
-        from .skills.coding.delegation import router
-        return {'by_kind':outcomes.stats(store.list(100000),include_eval),'calibration':router.calibration(store.list(100000))}
+    def outcome_stats(include_eval:bool=False,include_history:bool=False):
+        from . import router
+        jobs=outcomes.counted(store.list(100000),include_history)
+        return {'since':None if include_history else outcomes.epoch(),'by_kind':outcomes.stats(jobs,include_eval),'calibration':router.calibration(jobs)}
+
+    @app.post('/api/outcomes/reset',dependencies=[Depends(auth)])
+    def outcome_reset(body:dict|None=None):
+        """Start counting acceptance statistics, routing estimates and the dataset from `since` (unix time, default now). Nothing is deleted; include_history brings the earlier jobs back."""
+        since=(body or {}).get('since')
+        if since is not None and not isinstance(since,(int,float)):raise HTTPException(409,'since must be a unix time')
+        return {'since':outcomes.reset_epoch(since),'kept':len(store.list(100000))}
 
     @app.post('/api/jobs/{ident}/apply',dependencies=[Depends(auth)])
     def apply_result(ident:str,options:ApplyOptions|None=None):

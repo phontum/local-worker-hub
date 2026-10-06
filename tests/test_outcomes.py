@@ -139,3 +139,58 @@ def test_the_dataset_endpoint_and_cli_write_jsonl(store, origin, tmp_path, monke
         cli.main()
         lines = target.read_text().splitlines()
         assert len(lines) == 1 and json.loads(lines[0])['frontier']['reason'] == 'wrong_edit' and oct(target.stat().st_mode)[-3:] == '600'
+
+# Stats epoch --------------------------------------------------------------------------------------------------------------
+
+def test_the_epoch_only_decides_what_is_counted_and_never_deletes(store, origin, tmp_path, monkeypatch):
+    import time as _time
+    from hub import router
+    from hub.skills.coding.delegation import outcomes as out
+    monkeypatch.setattr(out, 'CONFIG', tmp_path / 'cfg')
+    old, _ = make_reviewed_job(store, origin, tmp_path, 'mcp', 'takeover')
+    assert out.epoch() is None and out.counted(store.list()) == store.list()
+    since = out.reset_epoch(_time.time() + 1)
+    assert out.epoch() == since and oct((tmp_path / 'cfg' / 'stats-epoch.json').stat().st_mode)[-3:] == '600'
+    assert out.counted(store.list()) == [] and len(out.counted(store.list(), include_history=True)) == 1
+    assert out.stats(out.counted(store.list())) == [] and out.stats(out.counted(store.list(), True))[0]['takeover'] == 1
+    assert store.get(old['id'])['review']['decision'] == 'takeover'  # nothing was removed
+    fresh = router.estimate('editor', 'mechanical', 'x' * 200, 2, out.counted(store.list()))
+    assert fresh['basis']['real_reviews'] == 0
+    assert router.estimate('editor', 'mechanical', 'x' * 200, 2, out.counted(store.list(), True))['basis']['real_reviews'] == 1
+    monkeypatch.setattr(out, 'epoch', lambda: _time.time() - 10_000)
+    assert len(out.counted(store.list())) == 1  # a job submitted after the epoch counts again
+
+def test_the_reset_endpoint_and_stats_cli(store, origin, tmp_path, monkeypatch, capsys):
+    import sys
+    from hub import cli, client
+    from hub.skills.coding.delegation import outcomes as out
+    monkeypatch.setattr(out, 'CONFIG', tmp_path / 'cfg')
+    make_reviewed_job(store, origin, tmp_path)
+    headers = {'Authorization': 'Bearer ' + initialize()}
+    with TestClient(create_app(store, start_workers=False), base_url='http://127.0.0.1:8765') as c:
+        assert c.get('/api/outcomes', headers=headers).json()['by_kind'][0]['takeover'] == 1
+        monkeypatch.setattr(client, 'call', lambda method, path, data=None: c.request(method, path, headers=headers).json())
+        monkeypatch.setattr(sys, 'argv', ['local-worker', 'stats', 'reset'])
+        cli.main()
+        assert 'earlier job(s) are kept' in capsys.readouterr().out
+        shown = c.get('/api/outcomes', headers=headers).json()
+        assert shown['by_kind'] == [] and shown['since'] is not None
+        assert c.get('/api/outcomes?include_history=true', headers=headers).json()['by_kind'][0]['takeover'] == 1
+        assert c.get('/api/dataset', headers=headers).json()['records'] == [] and len(c.get('/api/dataset?include_history=true', headers=headers).json()['records']) == 1
+        monkeypatch.setattr(sys, 'argv', ['local-worker', 'stats'])
+        cli.main()
+        assert 'No reviewed delegations counted yet' in capsys.readouterr().out
+
+def test_reset_accepts_a_start_date(store, origin, tmp_path, monkeypatch, capsys):
+    import sys
+    import time as _time
+    from hub import cli, client
+    from hub.skills.coding.delegation import outcomes as out
+    monkeypatch.setattr(out, 'CONFIG', tmp_path / 'cfg')
+    headers = {'Authorization': 'Bearer ' + initialize()}
+    with TestClient(create_app(store, start_workers=False), base_url='http://127.0.0.1:8765') as c:
+        monkeypatch.setattr(client, 'call', lambda method, path, data=None: c.request(method, path, headers=headers, json=data).json())
+        monkeypatch.setattr(sys, 'argv', ['local-worker', 'stats', 'reset', '--since', '2026-10-05'])
+        cli.main()
+        assert out.epoch() == _time.mktime(_time.strptime('2026-10-05', '%Y-%m-%d')) and 'Counting from 2026-10-05 00:00' in capsys.readouterr().out
+        assert c.post('/api/outcomes/reset', headers=headers, json={'since': 'yesterday'}).status_code == 409

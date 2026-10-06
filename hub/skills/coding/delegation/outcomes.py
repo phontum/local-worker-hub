@@ -10,11 +10,34 @@ import time
 from collections import defaultdict
 from pathlib import Path
 from hub.skills.coding.editing import workspace
-from hub.settings import STATE
+from hub.settings import CONFIG, STATE
 
 NOT_REAL = ('eval', 'benchmark', 'legacy-import')
 LANGUAGES = {'.py': 'python', '.js': 'javascript', '.jsx': 'javascript', '.mjs': 'javascript', '.ts': 'typescript', '.tsx': 'typescript', '.go': 'go', '.rs': 'rust',
              '.java': 'java', '.rb': 'ruby', '.css': 'css', '.html': 'html', '.md': 'markdown', '.json': 'json', '.toml': 'toml', '.yml': 'yaml', '.yaml': 'yaml'}
+
+EPOCH_FILE = 'stats-epoch.json'
+
+def epoch():
+    """Unix time from which acceptance statistics, routing estimates and the dataset count, or None for the whole history. Jobs are never deleted: the epoch only decides what is counted."""
+    try:
+        return float(json.loads((CONFIG / EPOCH_FILE).read_text())['since'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+def reset_epoch(now=None):
+    """Start counting from now. History stays on disk and in the job store and is still available with include_history."""
+    since = now or time.time()
+    CONFIG.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = CONFIG / EPOCH_FILE
+    path.write_text(json.dumps({'since': since, 'note': 'jobs submitted before this time are not counted unless history is requested'}))
+    path.chmod(0o600)
+    return since
+
+def counted(jobs, include_history=False):
+    """The jobs that count: those submitted at or after the epoch (all of them when there is none or history is requested)."""
+    since = None if include_history else epoch()
+    return [j for j in jobs if since is None or (j.get('created') or 0) >= since]
 
 def is_real(job):
     """A job a frontier agent or a person delegated, as opposed to a benchmark or imported history."""
