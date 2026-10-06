@@ -3,6 +3,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pathlib import Path
 import re
 from .model_registry import models as registered_models
+from .skills.coding.editing.mappings import LiteralMapping
 
 Role = Literal['investigator', 'editor', 'validator', 'researcher', 'personal']
 
@@ -17,6 +18,8 @@ class Check(BaseModel):
     depends_on: list[str] = Field(default_factory=list, max_length=12)
     requires_test_database: bool = False
     guard_next_dev: bool = False
+    expected_test_files: list[str] = Field(default_factory=list,max_length=40)
+    minimum_tests: int | None = Field(default=None,ge=1)
 
 def default_timeout(role, preset=None, board=False, verify=False, review=False):
     """Model-time budget when the caller gives none: plain public lookups are quick, everything else keeps 300s."""
@@ -77,6 +80,8 @@ class JobRequest(BaseModel):
     model: str | None = Field(default=None, pattern=r'^[a-z][a-z0-9_-]{0,30}$')
     history: list[Turn] = Field(default_factory=list, max_length=6)
     spec: dict | None = None  # the DelegationSpec this job was compiled from (hub.spec); its mechanical criteria are verified after the edit
+    literal_mappings: list[LiteralMapping] = Field(default_factory=list, max_length=80)
+    execution_mode: Literal['model', 'literal'] = 'model'
 
     @model_validator(mode='before')
     @classmethod
@@ -88,6 +93,19 @@ class JobRequest(BaseModel):
 
     @model_validator(mode='after')
     def boundaries(self):
+        for mapping in self.literal_mappings:
+            if mapping.path and mapping.path not in self.allowed_paths:
+                raise ValueError('Mapping path must be an authorized editable file')
+        if self.literal_mappings and self.role != 'editor':
+            raise ValueError('Mappings are only available to Editors')
+        if self.execution_mode == 'literal':
+            if self.role != 'editor' or not self.literal_mappings or self.delete_paths or self.kind not in (None,'mechanical'):
+                raise ValueError('Literal execution requires a mechanical Editor with mappings and no deletions')
+            if any(m.path is None or m.expected_count is None for m in self.literal_mappings):
+                raise ValueError('Literal execution requires path and expected_count for every mapping')
+            if self.in_place or self.investigate_first or self.review_pass:
+                raise ValueError('Literal execution uses a private workspace without model investigation or review')
+            self.repair_attempts=0
         if self.execution_preset == 'small' and 'timeout' not in self.model_fields_set:
             self.timeout = 120
         if self.board and 'timeout' not in self.model_fields_set:
@@ -155,6 +173,8 @@ class JobRequest(BaseModel):
             done.update(ready)
             for n in ready: del pending[n]
         for check in self.checks:
+            if any(Path(p).is_absolute() or '..' in Path(p).parts or not p.strip() for p in check.expected_test_files):
+                raise ValueError('Expected test files must be repository-relative paths')
             reserved = {'HOME','PWD','LOCAL_WORKER_STATE','LOCAL_WORKER_CONFIG','OPENCODE_CONFIG_CONTENT'}
             if reserved.intersection([*check.env_allowlist, *check.environment, *check.required_env]):
                 raise ValueError('Reserved environment variable requested')
@@ -173,7 +193,7 @@ class JobRequest(BaseModel):
     def needs_answer_review(self):
         # Implementation already has an independent review. Direct validation
         # remains deterministic, including when extended context was requested.
-        if self.workflow == 'implement' or (self.role == 'validator' and self.summary_mode == 'none' and not self.source_job_id):
+        if self.execution_mode=='literal' or self.workflow == 'implement' or (self.role == 'validator' and self.summary_mode == 'none' and not self.source_job_id):
             return False
         if self.review_pass is not None:
             return self.review_pass

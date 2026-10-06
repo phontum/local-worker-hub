@@ -25,15 +25,7 @@ class Target(Strict):
     symbol: str | None = Field(default=None, max_length=200)
     lines: tuple[int, int] | None = None
 
-class Mapping(Strict):
-    old: str = Field(min_length=1, max_length=300)
-    new: str = Field(min_length=1, max_length=300)
-
-    @model_validator(mode='after')
-    def one_line(self):
-        if not SINGLE_LINE.match(self.old) or not SINGLE_LINE.match(self.new):
-            raise ValueError('A mapping side must be one line without semicolons')
-        return self
+Mapping = mappings.LiteralMapping
 
 class Change(Strict):
     description: str = Field(min_length=1, max_length=1500)
@@ -82,6 +74,7 @@ class DelegationSpec(Strict):
     check_groups: list[str] = Field(default_factory=list, max_length=12)
     preset: Literal['small', 'work', 'extended'] = 'work'
     handoff_id: str | None = Field(default=None, max_length=200)
+    execution_mode: Literal['model','literal'] = 'model'
 
     def all_mappings(self):
         return [(m.old, m.new) for change in self.changes for m in change.mappings]
@@ -124,7 +117,8 @@ def compile_spec(spec, repo, caller='mcp', idempotency_key=None):
         raise ValueError('Only editing specs may name scope.edit or scope.delete')
     kwargs = dict(role=role, kind=spec.kind, repo=repo, task=task_text(spec), read_paths=read, evidence_job_ids=spec.evidence.job_ids, handoff_id=spec.handoff_id,
                   checks=spec.checks, profile_ref=spec.profile_ref, check_groups=spec.check_groups, execution_preset=spec.preset, caller=caller,
-                  timeout=default_timeout(role, spec.preset), idempotency_key=idempotency_key or uuid.uuid4().hex, spec=spec.model_dump(mode='json'))
+                  timeout=default_timeout(role, spec.preset), idempotency_key=idempotency_key or uuid.uuid4().hex, spec=spec.model_dump(mode='json'),
+                  literal_mappings=[m for change in spec.changes for m in change.mappings] if role=='editor' else [],execution_mode=spec.execution_mode)
     if role == 'editor':
         kwargs.update(allowed_paths=edit, delete_paths=spec.scope.delete)
         if spec.checks or spec.profile_ref:

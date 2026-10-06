@@ -30,20 +30,22 @@ def create_server():
     server=FastMCP('local-worker-hub')
 
     @server.tool(annotations=WRITE)
-    def investigate_code(repo: str, question: str, read_paths: list[str] | None=None, kind: str='explain', idempotency_key: str | None=None) -> dict:
+    def investigate_code(repo: str, question: str, read_paths: list[str] | None=None, kind: str='explain', idempotency_key: str | None=None, handoff_id: str | None=None) -> dict:
         """Ask the local worker to investigate code (read-only): find all code involved in X, explain how X works, where a config value is used, compare two implementations, or check whether a requirement is implemented. kind is one of find_code, explain, config_use, compare, check_requirement. The report gives host-verified path:line references; a COMPLETE report always has at least one. Returns a job id immediately."""
         if kind not in INVESTIGATOR_KINDS:raise ValueError('kind must be one of '+', '.join(INVESTIGATOR_KINDS))
         return submit_request(JobRequest(role='investigator',kind=kind,repo=repo,task=question,read_paths=read_paths or [],execution_preset='work',caller='mcp',
-            timeout=default_timeout('investigator','work'),idempotency_key=idempotency_key or uuid.uuid4().hex),NEXT_READ)
+            timeout=default_timeout('investigator','work'),handoff_id=handoff_id,idempotency_key=idempotency_key or uuid.uuid4().hex),NEXT_READ)
 
     @server.tool(annotations=WRITE)
-    def implement_change(repo: str, task: str, files: list[str], checks: list[dict] | None=None, read_paths: list[str] | None=None, delete_paths: list[str] | None=None, kind: str='mechanical', continue_from: str | None=None, idempotency_key: str | None=None) -> dict:
-        """Ask the local worker to make a bounded, clearly specified change in exactly the listed files (a mechanical change, or a specified guard; kind is mechanical or guard). It works in a private copy of the repository; nothing changes in your tree until apply_result. With checks it runs them and gets one repair. Keep it to one concern or one file per job where you can: a long task still runs (a reply cut off by the output limit is continued from where it stopped), but the report is easier to review when the job is small. For a file over 400 lines, name the exact strings to change. read_paths adds read-only context. Returns a job id immediately."""
+    def implement_change(repo: str, task: str, files: list[str], checks: list[dict] | None=None, read_paths: list[str] | None=None, delete_paths: list[str] | None=None, kind: str='mechanical', continue_from: str | None=None, idempotency_key: str | None=None,
+                         mappings: list[dict] | None=None, execution_mode: str='model', handoff_id: str | None=None) -> dict:
+        """Make a bounded mechanical change or specified guard in exactly files. Review patch.diff and acceptance, then apply_result; the job edits a private copy. Optional mappings [{path, old, new, expected_count}] verify every explicit replacement before commit. execution_mode='literal' applies these exact counted substitutions with zero model tokens (mechanical only); default 'model' generates edits and checks the mappings. Literal mode requires path and expected_count for every mapping and has no model repair. Approved checks still run. read_paths adds read-only implementation context; handoff_id groups related jobs for effort and baseline accounting. Returns a job id immediately."""
         if kind not in EDITOR_KINDS:raise ValueError('kind must be one of '+', '.join(EDITOR_KINDS))
         checks_=[Check.model_validate(c) for c in checks or []]
         return submit_request(JobRequest(role='editor',kind=kind,repo=repo,task=task,allowed_paths=files,delete_paths=delete_paths or [],read_paths=with_files(files,read_paths),checks=checks_,
             workflow='implement' if checks_ else 'single',repair_attempts=1 if checks_ else 0,execution_preset='work',caller='mcp',timeout=default_timeout('editor','work'),
-            workspace_from=continue_from,idempotency_key=idempotency_key or uuid.uuid4().hex),NEXT_EDITOR)
+            workspace_from=continue_from,literal_mappings=mappings or [],execution_mode=execution_mode,handoff_id=handoff_id,
+            idempotency_key=idempotency_key or uuid.uuid4().hex),NEXT_EDITOR)
 
     @server.tool(annotations=WRITE)
     def fix_failing_test(repo: str, test_command: list[str], files: list[str], test_id: str='', details: str='', read_paths: list[str] | None=None, idempotency_key: str | None=None) -> dict:
@@ -62,10 +64,10 @@ def create_server():
             idempotency_key=idempotency_key or uuid.uuid4().hex),NEXT_EDITOR)
 
     @server.tool(annotations=WRITE)
-    def run_checks(repo: str, checks: list[dict], idempotency_key: str | None=None) -> dict:
+    def run_checks(repo: str, checks: list[dict], idempotency_key: str | None=None, handoff_id: str | None=None) -> dict:
         """Run explicitly approved checks (argv arrays) and get the failing tests with file:line and the assertion, parsed by the host at zero model tokens. Each check is {name, argv, cwd?, timeout?}. Never use it for installs, deployments or destructive commands. Returns a job id immediately."""
         return submit_request(JobRequest(role='validator',kind='run_tests',repo=repo,task='Run the approved checks and report which tests fail and why.',
-            checks=[Check.model_validate(c) for c in checks],caller='mcp',timeout=default_timeout('validator'),idempotency_key=idempotency_key or uuid.uuid4().hex),NEXT_READ)
+            checks=[Check.model_validate(c) for c in checks],caller='mcp',timeout=default_timeout('validator'),handoff_id=handoff_id,idempotency_key=idempotency_key or uuid.uuid4().hex),NEXT_READ)
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False,destructiveHint=True,idempotentHint=True,openWorldHint=True))
     def submit_job(role: str, task: str, idempotency_key: str, repo: str | None=None,

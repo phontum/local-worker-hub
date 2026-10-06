@@ -62,6 +62,24 @@ def parse_pytest(text):
         out = [failure('pytest', name, f, int(l) if l else None, m, fr) for name, ((f, l), m, fr) in sections.items()]
     return out, pytest_counts(text)
 
+def parse_unittest(text):
+    out=[]
+    pattern=r'(?ms)^(FAIL|ERROR): (.+?)\n-+\n(.*?)(?=^={3,}\n|^-{3,}\nRan \d+ tests?|\Z)'
+    for kind, ident, body in re.findall(pattern,text):
+        frames=frames_of(body)
+        at=frames[-1] if frames else {}
+        messages=re.findall(r'(?m)^([\w.]+(?:Error|Exception|Interrupt|Exit):[^\n]*)$',body)
+        message=messages[-1] if messages else next((line for line in reversed(body.splitlines()) if line and not line[0].isspace()),'')
+        out.append(failure('unittest',ident,at.get('file'),at.get('line'),message,frames))
+    counts={}
+    match=re.search(r'Ran (\d+) tests? in [\d.]+s\s*\n\s*(OK|FAILED)(?:\s*\(([^)]*)\))?',text)
+    if match:
+        details=dict((k,int(v)) for k,v in re.findall(r'(failures|errors|skipped|expected failures|unexpected successes)=(\d+)',match[3] or ''))
+        total=int(match[1]);bad=details.get('failures',0)+details.get('unexpected successes',0)
+        counts={'total':total,'failed':bad,'error':details.get('errors',0),'skipped':details.get('skipped',0)}
+        counts['passed']=max(0,total-bad-counts['error']-counts['skipped'])
+    return out,counts
+
 def parse_vitest(text):
     out = []
     for block in re.split(r'(?m)^ FAIL  ', text)[1:]:
@@ -124,6 +142,7 @@ def parse_eslint(text):
     return out, {'errors': len(out)}
 
 DETECT = (
+    ('unittest', re.compile(r'(?m)^(?:FAIL: |ERROR: |Ran \d+ tests? in [\d.]+s)')),
     ('pytest', re.compile(r'(?m)^(?:=+ test session starts|=+ FAILURES =+|FAILED \S+::|\d+ (?:passed|failed)\b.* in [\d.]+s)')),
     ('vitest', re.compile(r'(?m)^ (?:RUN|FAIL)  |^\s*Test Files\s')),
     ('node:test', re.compile(r'(?m)^TAP version|^# (?:pass|fail) \d+$')),
@@ -132,12 +151,12 @@ DETECT = (
     ('ruff', re.compile(r'(?m)^\S+\.py:\d+:\d+: [A-Z]+\d+ ')),
     ('eslint', re.compile(r'(?m)^\s+\d+:\d+\s+error\s+')),
 )
-PARSERS = {'pytest': parse_pytest, 'vitest': parse_vitest, 'node:test': parse_node_tap, 'tsc': parse_tsc,
+PARSERS = {'pytest': parse_pytest, 'unittest':parse_unittest, 'vitest': parse_vitest, 'node:test': parse_node_tap, 'tsc': parse_tsc,
            'mypy': parse_mypy, 'ruff': parse_ruff, 'eslint': parse_eslint}
 
 def detect(text, argv=None):
     joined = ' '.join(argv or [])
-    for name, hint in (('pytest', 'pytest'), ('vitest', 'vitest'), ('tsc', 'tsc'), ('mypy', 'mypy'), ('ruff', 'ruff'), ('eslint', 'eslint')):
+    for name, hint in (('pytest', 'pytest'), ('unittest','unittest'), ('vitest', 'vitest'), ('tsc', 'tsc'), ('mypy', 'mypy'), ('ruff', 'ruff'), ('eslint', 'eslint')):
         if hint in joined:
             return name
     if re.search(r'\bnode\b.*--test', joined):

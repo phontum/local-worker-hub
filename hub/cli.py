@@ -276,6 +276,8 @@ def main():
     p.add_argument('--handoff-id',help='Group related jobs and takeovers for accounting')
     modes=p.add_mutually_exclusive_group();modes.add_argument('--read-only',action='store_true');modes.add_argument('--write',action='store_true')
     p.add_argument('--repo');p.add_argument('--allow-path',action='append',default=[]);p.add_argument('--checks',help='JSON file containing approved check definitions')
+    p.add_argument('--mappings',help='JSON array of exact {path, old, new, expected_count} replacements')
+    p.add_argument('--literal',action='store_true',help='Apply explicit mappings in a private workspace without model inference')
     p.add_argument('--context-file');p.add_argument('--timeout',type=int);p.add_argument('--no-recovery',action='store_true')
     p.add_argument('--async',dest='asynchronous',action='store_true');p.add_argument('--json',action='store_true')
     p.add_argument('--caller',default='cli');p.add_argument('--caller-session');p.add_argument('--idempotency-key')
@@ -317,7 +319,8 @@ def main():
             profile_hash=args.profile_hash,profile_ref=args.profile_ref,check_groups=args.check_group,parameters=parameters,
             workflow=args.workflow,repair_attempts=args.repair_attempts,investigate_first=args.investigate_first,in_place=args.in_place,skip_gate=args.no_gate,workspace_from=args.continue_from,continuation=not args.no_continuation,model_output=args.model_output,match_mode=args.match_mode or 'line',kind=args.kind,
             model=args.model,model_context=args.model_context,model_thinking=None if args.model_thinking is None else args.model_thinking=='on',
-            execution_preset=preset,review_pass=args.review_pass,read_paths=args.read_path,evidence_job_ids=args.evidence_job,handoff_id=args.handoff_id,board=args.board,board_mode=args.board_mode,verify=args.verify,agent_loop=args.agent_loop)
+            execution_preset=preset,review_pass=args.review_pass,read_paths=args.read_path,evidence_job_ids=args.evidence_job,handoff_id=args.handoff_id,board=args.board,board_mode=args.board_mode,verify=args.verify,agent_loop=args.agent_loop,
+            literal_mappings=json.loads(Path(args.mappings).read_text()) if args.mappings else [],execution_mode='literal' if args.literal else 'model')
     except Exception as e:p.error(str(e))
     ident=None
     try:

@@ -69,7 +69,8 @@ def context_summary(reports):
             files[path] = {'lines': info['lines'], 'shown': info['shown'], 'whole': info['whole']}
     return {'files': files, 'missing_mappings': sorted({m for r in reports for m in r.get('coverage', {}).get('missing_mappings', [])})[:6],
             'hidden_targets': sorted({m for r in reports for m in r.get('coverage', {}).get('hidden', [])})[:6],
-            'references': sorted({(ref['path'], ref['mode']) for r in reports for ref in r.get('references', [])})}
+            'references': sorted({(ref['path'], ref['mode']) for r in reports for ref in r.get('references', [])}),
+            'omitted_reference_symbols':sorted({f"{ref['path']}:{name}" for r in reports for ref in r.get('references',[]) for name in ref.get('omitted_symbols',[])})}
 
 def edit_summary(turn_files):
     """Counts of generation turns, truncations, rejected replies and destructive-looking blocks from the pipeline's per-turn records."""

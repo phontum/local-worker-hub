@@ -49,6 +49,30 @@ def parsed_output(output, argv=None, root=None):
         counts = {'total': sum(c.values()), 'passed': c.get('passed', 0), 'failed': failed_n, 'skipped': c.get('skipped', 0), 'format': 'pytest'}
     return counts, found['failures']
 
+def parsed_log(path, argv, root):
+    """Read bounded head and tail so an early failure survives a huge assertion dump."""
+    with Path(path).open('rb') as stream:
+        data=stream.read(2_000_001)
+        if len(data)>2_000_000:
+            stream.seek(-1_000_000,2)
+            data=data[:1_000_000]+b'\n[Middle of log omitted]\n'+stream.read(1_000_000)
+    return parsed_output(data.decode('utf-8','replace'),argv,root)
+
+def expected_files(check, root):
+    root=Path(root).resolve()
+    for name in check.expected_test_files:
+        target=(root/name).resolve()
+        if not target.is_relative_to(root) or not target.is_file():
+            return 'Expected test file missing or outside repository: '+name
+    return None
+
+def verify_check_coverage(check, result):
+    if result.get('status')!='passed' or check.minimum_tests is None:return result
+    counts=result.get('counts') or {}
+    if counts.get('total',0)<check.minimum_tests:
+        result.update(status='failed',reason=f"Expected at least {check.minimum_tests} tests; observed {counts.get('total', 'no recognized test count')}")
+    return result
+
 
 def failure_lines(check, limit=10, width=160):
     """One line per parsed failure: test id, file:line, first assertion text."""
@@ -105,6 +129,8 @@ def run_check_sync(check, root, cap=120):
     cwd = (root / check.cwd).resolve()
     if not cwd.is_dir() or not (cwd == root or root in cwd.parents):
         return result | {'reason': 'Check cwd is not a directory inside the repository'}
+    missing=expected_files(check,root)
+    if missing:return result | {'reason':missing}
     if check.depends_on or check.requires_test_database or check.guard_next_dev or check.required_env:
         return result | {'reason': 'This check needs the job runner (dependencies, test database, dev-server guard or required environment); run it yourself'}
     env = {k: v for k, v in os.environ.items() if k in ('PATH', 'HOME', 'USER', 'LANG', 'LC_ALL') or k in check.env_allowlist}
@@ -113,9 +139,10 @@ def run_check_sync(check, root, cap=120):
     started = time.monotonic()
     try:
         done = subprocess.run(check.argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=min(check.timeout, cap))
-        output = (done.stdout + done.stderr).decode('utf-8', errors='replace')[-10000:]
-        counts, failures = parsed_output(output, check.argv, str(cwd))
-        result.update(exit_code=done.returncode, status='passed' if done.returncode == 0 else 'failed', output_tail=output, counts=counts, failures=failures if done.returncode else [])
+        output = (done.stdout + done.stderr).decode('utf-8', errors='replace')
+        counts, failures = parsed_output(output[:1_000_000]+'\n'+output[-1_000_000:] if len(output)>2_000_000 else output, check.argv, str(cwd))
+        result.update(exit_code=done.returncode, status='passed' if done.returncode == 0 else 'failed', output_tail=output[-10000:], counts=counts, failures=failures if done.returncode else [])
+        verify_check_coverage(check,result)
     except subprocess.TimeoutExpired:
         result.update(timed_out=True, status='failed', reason=f'Timed out after {min(check.timeout, cap)}s')
     except OSError as error:

@@ -60,6 +60,21 @@ def test_budget_shrinks_with_a_larger_output_cap_and_a_longer_prompt():
     assert contextpack.budget_chars(16384, 8192, 3000) < contextpack.budget_chars(16384, 4096, 3000) < contextpack.budget_chars(32768, 4096, 3000)
     assert contextpack.budget_chars(16384, 4096, 20000) < contextpack.budget_chars(16384, 4096, 3000)
 
+def test_reference_implementation_over_6000_chars_uses_available_budget():
+    source = 'def scenario():\n    return (0, {}, {})\n' + '# padding\n' * 650
+    packed = contextpack.pack({'test_demo.py': snap('test_demo.py', None)}, 'Test scenario return contract', 30000,
+                              [('demo.py', source, 'h')])
+    assert packed.report['references'][0]['mode'] == 'whole'
+    assert 'return (0, {}, {})' in packed.text
+
+def test_large_reference_selects_named_implementation_and_reports_omissions():
+    source = '# filler\n' * 3000 + 'def scenario():\n    return (0, {}, {})\n'
+    blocks, info = contextpack.pack_references([('demo.py', source, 'h')], 2000, 'Test scenario return contract')
+    assert info[0]['mode'] == 'bodies' and 'return (0, {}, {})' in blocks[0]
+    huge = 'def scenario():\n' + '    value = 123\n' * 400
+    blocks, info = contextpack.pack_references([('demo.py', huge, 'h')], 500, 'Test scenario')
+    assert blocks == [] and info[0]['omitted_symbols'] == ['scenario']
+
 def job(tmp_path, repo, task, allowed, read=(), key='cp'):
     directory = tmp_path / 'job'
     directory.mkdir()

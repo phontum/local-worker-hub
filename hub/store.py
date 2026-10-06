@@ -135,8 +135,22 @@ class Store:
             return [dict(r) | {'data':json.loads(r['data'])} for r in db.execute(
                 'SELECT * FROM (SELECT * FROM hardware ORDER BY time DESC LIMIT ?) ORDER BY time', (limit,))]
 
-    def summary(self):
-        jobs = self.list(10000)
+    def summary(self, since=None, until=None, include_eval=True, include_history=True):
+        from .skills.coding.delegation import outcomes
+        if not include_history and since is None:
+            since = outcomes.epoch()
+        if since is not None and until is not None and since >= until:
+            raise ValueError('since must be earlier than until')
+        clauses, params = [], []
+        if since is not None:
+            clauses.append('j.created >= ?'); params.append(since)
+        if until is not None:
+            clauses.append('j.created < ?'); params.append(until)
+        if not include_eval:
+            clauses.append("COALESCE(json_extract(j.request,'$.caller'),'cli') NOT IN ('eval','benchmark','legacy-import')")
+        where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
+        with self.connect() as db:
+            jobs = [self.decode(r) for r in db.execute('SELECT j.* FROM jobs j' + where + ' ORDER BY j.created DESC', params)]
         usage = {'input':0,'output':0,'reasoning':0,'cache_read':0,'cache_write':0}
         role_stats={}
         handoffs={}
@@ -149,8 +163,12 @@ class Store:
             h['local_output_tokens']+=((j.get('result') or {}).get('usage') or {}).get('output',0) or 0
             h['review_effort_seconds']+=(j.get('review') or {}).get('review_effort_seconds',0) or 0
             h['takeovers']+=int((j.get('review') or {}).get('decision')=='takeover')
-            name=j['request'].get('role','unknown');stats=role_stats.setdefault(name,{'jobs':0,'accepted':0,'completed':0,'takeovers':0,'repair_attempts':0})
+            name=j['request'].get('role','unknown');stats=role_stats.setdefault(name,{'jobs':0,'reviewed':0,'accepted':0,'completed':0,'takeovers':0,'repair_attempts':0,'checks':{}})
             stats['jobs']+=1
+            stats['reviewed']+=int(bool(j['review']))
+            for check in (j['result'] or {}).get('checks', []):
+                status=check.get('status') or 'unknown'
+                stats['checks'][status]=stats['checks'].get(status,0)+1
             if j['review'] and j['review']['decision']=='accepted':stats['accepted']+=1
             if j['review'] and j['review'].get('task_outcome')=='completed':stats['completed']+=1
             if j['review'] and j['review']['decision']=='takeover':stats['takeovers']+=1
@@ -166,7 +184,7 @@ class Store:
             if r['decision']!='accepted':review_reasons[r.get('reason') or 'unspecified']=review_reasons.get(r.get('reason') or 'unspecified',0)+1
         context_stats={}
         with self.connect() as db:
-            for row in db.execute("SELECT data FROM events WHERE kind='inference'"):
+            for row in db.execute("SELECT e.data FROM events e JOIN jobs j ON j.id=e.job" + where + (" AND" if where else " WHERE") + " e.kind='inference'", params):
                 entry=json.loads(row['data']);limit=entry.get('context_limit')
                 if limit:
                     stats=context_stats.setdefault(str(limit),{'requests':0,'peak_tokens':0,'seconds':0})
@@ -181,7 +199,11 @@ class Store:
         measured = [j for j in matched if j['review'].get('measurement_source','measured')=='measured']
         savings = sum(j['review']['baseline_frontier_tokens']-j['review']['delegated_frontier_tokens'] for j in measured)
         money = [j for j in jobs if j['review'] and j['review'].get('measurement_source','measured')=='measured' and j['review'].get('baseline_frontier_cost') is not None and j['review'].get('delegated_frontier_cost') is not None]
-        return {'jobs':len(jobs),'accepted':sum(bool(j['review'] and j['review']['decision']=='accepted') for j in jobs),
+        reviewed=sum(bool(j['review']) for j in jobs)
+        effort=sum((j.get('review') or {}).get('review_effort_seconds') is not None for j in jobs)
+        return {'jobs':len(jobs),'reviewed':reviewed,'accepted':sum(bool(j['review'] and j['review']['decision']=='accepted') for j in jobs),
+            'selection':{'since':since,'until':until,'include_eval':include_eval,'include_history':include_history},
+            'measurement_coverage':{'reviewed_jobs':reviewed,'review_effort_jobs':effort,'matched_token_baselines':len(measured),'manual_token_baselines':len(matched)-len(measured)},
             'role_stats':role_stats,'review_stats':{'by_kind':review_by_kind,'reasons':review_reasons},'context_stats':context_stats,'handoff_stats':list(handoffs.values())[:100],
             'usage':usage,'pricing':rates,'api_equivalent_usd':equivalent,'matched_baselines':len(measured),
             'manual_estimate_baselines':len(matched)-len(measured),

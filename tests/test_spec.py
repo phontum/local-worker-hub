@@ -41,7 +41,7 @@ def test_roles_scope_rules_and_kind_rules(repo):
     assert compile_spec(DelegationSpec(goal='run', kind='run_tests', checks=[SPEC['checks'][0]]), str(repo)).role == 'validator'
 
 def test_the_model_rejects_malformed_input():
-    for bad in ({'goal': ''}, {'goal': 'x', 'surprise': 1}, {'goal': 'x', 'changes': [{'description': 'd', 'mappings': [{'old': 'a;b', 'new': 'c'}]}]},
+    for bad in ({'goal': ''}, {'goal': 'x', 'surprise': 1}, {'goal': 'x', 'changes': [{'description': 'd', 'mappings': [{'old': 'a\nb', 'new': 'c'}]}]},
                 {'goal': 'x', 'invariants': [{'kind': 'symbol_exists'}]}, {'goal': 'x', 'acceptance': [{'kind': 'check_passes'}]}, {'goal': 'x', 'evidence': {'job_ids': ['a'] * 5}}):
         with pytest.raises(ValidationError):
             DelegationSpec.model_validate(bad)

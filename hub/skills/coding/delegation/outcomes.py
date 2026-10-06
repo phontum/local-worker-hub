@@ -93,7 +93,7 @@ def row(job, directory=None):
     return {'job': job['id'], 'caller': request.get('caller'), 'real': is_real(job), 'role': request.get('role'), 'kind': request.get('kind'),
             'workflow': request.get('workflow'), 'languages': languages(paths), 'allowed_files': len(request.get('allowed_paths', [])),
             'read_files': len(request.get('read_paths', [])), 'checks': len(request.get('checks', [])), 'task_chars': len(request.get('task', '')),
-            'model': request.get('model') or 'default', 'context_files': len(context.get('files', [])) if isinstance(context, dict) else None,
+            'model': result.get('model') or request.get('model') or 'unrecorded', 'context_files': len(context.get('files', [])) if isinstance(context, dict) else None,
             'worker_status': result.get('worker_status'), 'diff': packet.get('diff'), 'scope_ok': packet.get('scope_ok'),
             'execution_seconds': metrics.get('execution_seconds'), 'local_tokens': (usage.get('input', 0) or 0) + (usage.get('output', 0) or 0) if isinstance(usage, dict) and usage else None,
             'decision': review.get('decision'), 'reason': review.get('reason'), 'review_effort_seconds': review.get('review_effort_seconds')}

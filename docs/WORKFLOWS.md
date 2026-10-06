@@ -186,6 +186,12 @@ matched baseline and delegated frontier total including orchestration, review,
 retry and takeover costs. Negative savings are retained. No measured baseline has
 been invented. Historical imports remain unverified and omit unavailable usage.
 
+The dashboard now defaults to real jobs since the stats reset, with Today and All
+history selectors, review coverage, check outcomes and measurement coverage.
+See [measurement and exact replacements](MEASUREMENT.md) for summary filters,
+typed mapping verification, zero-model literal edits, expected test coverage,
+Investigator evidence packets and the twelve-task pilot.
+
 Live acceptance checks covered file discovery, a one-file edit followed by a passing
 Node test with unrelated files preserved, failing validator output, public official
 documentation search/fetch, and running-process cancellation. A larger React edit

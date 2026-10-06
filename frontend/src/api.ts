@@ -38,10 +38,13 @@ export type ArtifactPage = { text: string; next_offset: number; has_more: boolea
 export type Event = { id: number; time: number; kind: string; data: Record<string, any> };
 export type Sample = { time: number; data: { cpu_percent: number; ram_used: number; ram_total: number; swap_used: number;
   gpu: { name: string; memory_used_mb: number; memory_total_mb: number; utilization_percent: number; temperature_c: number; power_w: number } | null } };
-export type Summary = { jobs: number; accepted: number; usage: Record<string, number>; api_equivalent_usd: number | null;
+export type Summary = { jobs: number; reviewed: number; accepted: number; usage: Record<string, number>; api_equivalent_usd: number | null;
   estimated_frontier_tokens_avoided: number | null; estimated_frontier_cost_avoided: number | null; matched_baselines: number;
-  pricing: { model?: string; as_of?: string | null };
-  role_stats?: Record<string, { jobs: number; accepted: number; completed: number; takeovers: number; repair_attempts: number }>;
+  pricing: { model?: string; as_of?: string | null; source?: string | null };
+  selection: { since: number | null; until: number | null; include_eval: boolean; include_history: boolean };
+  today: { jobs: number; usage: Record<string, number>; api_equivalent_usd: number | null; since: number; timezone: string };
+  measurement_coverage: { reviewed_jobs: number; review_effort_jobs: number; matched_token_baselines: number; manual_token_baselines: number };
+  role_stats?: Record<string, { jobs: number; reviewed: number; accepted: number; completed: number; takeovers: number; repair_attempts: number; checks: Record<string, number> }>;
   handoff_stats?: Array<{ id: string; jobs: number; model_seconds: number; check_seconds: number; review_effort_seconds: number; takeovers: number; local_output_tokens: number }> };
 
 export async function api<T>(url: string, options?: RequestInit): Promise<T> {

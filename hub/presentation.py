@@ -74,11 +74,16 @@ def result_summary(job):
     if r.get('ask'):refs.append('ask.json')
     refs += [c['artifact'] for c in checks if c.get('artifact')]
     refs += [c['artifact'] for attempt in r.get('attempts',[]) for c in attempt.get('checks',[]) if c.get('artifact')]
+    if r.get('investigation'):refs.append('work.investigation.json')
     value = {k:r.get(k) for k in ('report','worker_status','report_valid','usage','model','workspace_verified','repo','error','metrics','report_origin','source_job_id','completion')}
     value.update(id=job['id'], ready=True, state=job['state'], checks=checks, checks_failed=any(failed(c) for c in checks),
                  changed_files=r.get('changed_files',[])[:20], changed_file_count=len(r.get('changed_files',[])),
                  review=job.get('review'), attempts=r.get('attempts',[])[:3], workflow=r.get('workflow'),
                  answer_review=r.get('answer_review'), board=r.get('board'), ask=r.get('ask'), artifacts=refs, full_result=f"/api/jobs/{job['id']}/result?view=full")
+    if r.get('investigation'):
+        packet=r['investigation']
+        value['investigation']={'search_scope':packet['search_scope'],'unknowns':packet['unknowns'][:4],
+                               'requirement_count':len(packet['requirements']),'semantic_verification':'frontier_required'}
     if r.get('workspace'):value.update(workspace=live_workspace(job),acceptance=r.get('acceptance'));value['artifacts']=[*refs,'patch.diff']
     elif r.get('acceptance'):value['acceptance']=r['acceptance']
     if r.get('spec_verification'):value['spec_verification']={k:v for k,v in r['spec_verification'].items() if k!='results'}|{'results':r['spec_verification']['results'][:20]}

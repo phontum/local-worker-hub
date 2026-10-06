@@ -37,12 +37,20 @@ class Ref(BaseModel):
     line: int
     note: str = Field(max_length=200)
 
+class RequirementFinding(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    task_quote: str = Field(min_length=1,max_length=600)
+    status: str = Field(pattern=r'^(met|unmet|unknown)$')
+    refs: list[Ref] = Field(default_factory=list,max_length=8)
+
 class Finding(BaseModel):
     model_config = ConfigDict(extra='forbid')
     answer: str = Field(max_length=6000)
     refs: list[Ref] = Field(default_factory=list, max_length=24)
     complete: bool
     more: list[Range] = Field(max_length=4)
+    requirements: list[RequirementFinding] = Field(default_factory=list,max_length=20)
+    unknowns: list[str] = Field(default_factory=list,max_length=12)
 
 PICK = ('You are investigating a code repository to answer the question. Choose up to 6 file ranges to read (path exactly as listed, '
         'start and end line, at most 120 lines each). Candidate ranges come from the host code index (definitions, uses, imports, best first) '
@@ -51,7 +59,10 @@ ANSWER = ('Answer the question from the file excerpts. Put every supporting loca
           'excerpts; a short note); the host checks each against what was read. When asked to find all code involved, list every relevant location '
           'shown, including configuration, callers and importers. For a requirement or yes/no question start the answer with met, unmet or unknown. '
           'Say plainly what you could not find. Set complete=false when any requirement or part of the question is unknown or unverified, or when other ranges are needed (list them in more); '
-          'otherwise complete=true and more empty.')
+          'otherwise complete=true and more empty. For explain, compare and check_requirement tasks, include requirements for every explicit question: '
+          'task_quote is copied exactly from the original task, status is met/unmet/unknown, refs locate supporting implementation (not just names or test descriptions). '
+          'Return unknowns explicitly. Separate observed definitions, callers and branch conditions from your interpretation. A repository-wide absence or all-callers claim '
+          'requires the relevant search scope and callers to be inspected; excerpts alone do not prove absence. Do not infer return types or iteration behavior from names.')
 HOST_BUDGET = 26000
 EDIT_BASE = 'You are a careful code editor. Make exactly the change the task asks for in the listed files, preserving unrelated code and behaviour. '
 EDIT = EDIT_BASE + textedit.format_for()
@@ -112,10 +123,18 @@ def envelope(status, findings, files='None', checks='Not run', risks='None'):
 async def run_investigate(directory, label, prompt, phase='work'):
     request = JobRequest.model_validate_json((directory / 'request.json').read_text())
     files = ScopedFiles(request, audit_writer(directory, phase or label))
-    candidates, host_ranges = '', []
+    candidates, host_ranges, reference_hits = '', [], []
+    exhaustive=bool(re.search(r'\b(all|every|exists?|absence|callers?)\b',request.task,re.I))
     try:
-        found = CodeIndex.load(files).candidates(request.task, mentioned_text(files, request.task))
+        index=CodeIndex.load(files)
+        found = index.candidates(request.task, mentioned_text(files, request.task))
         candidates, host_ranges = format_candidates(found), select_ranges(found)
+        if exhaustive:
+            named=list(dict.fromkeys(seed[2] for seed in index.seeds(request.task)
+                                    if re.search(r'\b'+re.escape(seed[2])+r'\b',request.task)))[:4]
+            reference_hits=[{'name':name,**hit} for name in named for hit in index.references(name,41)]
+            priority=[{'path':h['path'],'start':max(1,h['line']-3),'end':h['line']+8,'why':'reference coverage: '+h['name']} for h in reference_hits[:24]]
+            host_ranges=priority+host_ranges
     except Exception as error:  # the index is an accelerator; the older map and search still work without it
         files.audit('index_error', {'error': str(error)[:250]})
     overview = (('Candidate ranges from the host code index (path:start-end  why), best first:\n' + candidates + '\n\n') if candidates else '') + \
@@ -137,16 +156,45 @@ async def run_investigate(directory, label, prompt, phase='work'):
             cut = '; '.join(sorted({g.cut_off_message for g in caller.truncations}))
             content = envelope('PARTIAL', 'No usable answer was produced.' + (' The model output was cut off.' if cut else ''), risks=cut or 'The local model returned no answer.')
         else:
-            good, bad = verified_refs(files, finding.refs, finding.answer)
-            evidence = ('\n\nEvidence (host-verified against lines read):\n' + '\n'.join(f'- {p}:{n} — {note}' for p, n, note in good)) if good else ''
+            refs=finding.refs+[ref for req in finding.requirements for ref in req.refs]
+            good, bad = verified_refs(files, refs, finding.answer)
+            # The host owns the quoted source; model notes are interpretations, not verified evidence.
+            def observed(path,line):
+                for item in files.evidence:
+                    if item.get('path')==path:
+                        for row in (item.get('lines') or '').splitlines():
+                            number,_,code=row.partition(': ')
+                            if number==str(line):return code[:240]
+                return ''
+            evidence = ('\n\nEvidence (locations host-verified against lines read; conclusions require frontier review):\n' +
+                        '\n'.join(f'- {p}:{n} — {note}\n  Observed: {observed(p,n)}' for p,n,note in good[:16])) if good else ''
             risks = []
+            strict=request.kind in ('explain','compare','check_requirement')
+            unresolved=list(finding.unknowns)
+            if strict and not finding.requirements:unresolved.append('No requirement evidence checklist was returned')
+            for req in finding.requirements:
+                locations,_=verified_refs(files,req.refs)
+                if req.task_quote not in request.task or req.status=='unknown' or not locations:
+                    unresolved.append(req.task_quote)
+            if finding.more:unresolved.append('Additional requested ranges remain unresolved')
+            if strict and (errors or bad):unresolved.append('Required reads or references remain unverified')
+            missing_hits=[h for h in reference_hits if h['line'] not in files.observed_lines.get(h['path'],{}).get('lines',{})]
+            if missing_hits:unresolved.append('Known reference sites unread: '+', '.join(f"{h['path']}:{h['line']}" for h in missing_hits[:6]))
+            if any(sum(h['name']==name for h in reference_hits)>=41 for name in {h['name'] for h in reference_hits}):
+                unresolved.append('Reference enumeration reached its bound; exhaustive coverage is unknown')
+            if unresolved:risks.append('Unresolved: '+'; '.join(unresolved)[:1200])
             if errors:
                 risks.append('Unread: ' + '; '.join(errors))
             if bad:
                 risks.append('Unverified references dropped (line not read): ' + ', '.join(f'{p}:{n}' for p, n, _ in bad[:6]))
             if not good:
                 risks.append('No host-verified path:line reference supports this answer')
-            content = envelope('COMPLETE' if finding.complete and good else 'PARTIAL', finding.answer.strip() + evidence,
+            scope=', '.join(request.read_paths) if request.read_paths else 'repository (scoped guards apply)'
+            packet={'search_scope':scope,'reference_precision':'name_based','reference_hits':reference_hits,'unread_reference_hits':missing_hits,
+                    'read_ranges':[{'path':e['path'],'start':e.get('start'),'lines':e.get('lines','').count('\n')+1} for e in files.evidence if e.get('path') and e.get('lines')],
+                    'requirements':[req.model_dump() for req in finding.requirements],'unknowns':unresolved,'semantic_verification':'frontier_required'}
+            artifact=directory/(label+'.investigation.json');artifact.write_text(json.dumps(packet));artifact.chmod(0o600)
+            content = envelope('COMPLETE' if finding.complete and good and not unresolved else 'PARTIAL', finding.answer.strip() + evidence + '\n\nSearch scope: '+scope,
                                risks='; '.join(risks) if risks else 'None identified.')
         write_session(directory, label, caller, prompt, content)
 
@@ -212,8 +260,29 @@ def salvage(gen, view, deletable=(), mode='substring'):
         return textedit.Plan({}, [], {}), 0
     return textedit.plan(edits, view, False, deletable, mode), len(edits)
 
+def run_literal(directory, request):
+    """Exact authorized substitutions with the same snapshot/commit guards as model edits."""
+    files=ScopedFiles(request,audit_writer(directory,'literal'))
+    try:
+        snapshots={r[0]:r for r in (textedit.snapshot(files,p) for p in request.allowed_paths)}
+        before={p:s[1] or '' for p,s in snapshots.items()}
+        contents=mappings.literal_contents(request.literal_mappings,before)
+        for p,new in contents.items():
+            reasons=textedit.suspicious(p,before[p],new)
+            if reasons:raise ValueError('; '.join(reasons))
+        changed,errors=textedit.commit(files,contents,snapshots)
+        if errors:raise ValueError('; '.join(errors))
+        return parse_report(envelope('COMPLETE' if changed else 'PARTIAL',
+                            'Applied exact literal mappings; no model inference.',files='\n'.join(changed) or 'None',risks='Frontier patch review required.'))
+    except (ScopeError,ValueError,OSError) as error:
+        return parse_report(envelope('BLOCKED','No literal edits applied.',risks=str(error)))
+
 async def run_edit(directory, label, prompt, phase='work'):
     request = JobRequest.model_validate_json((directory / 'request.json').read_text())
+    if request.literal_mappings:
+        explicit='\nExplicit literal mappings (all are required):\n'+json.dumps([m.model_dump() for m in request.literal_mappings])
+        request=request.model_copy(update={'task':request.task+explicit})
+        prompt+=explicit
     files = ScopedFiles(request, audit_writer(directory, phase or label))
     async with Caller(directory, label, request, load_profiles(directory, {}), 'edit') as caller:
         try:
@@ -243,7 +312,8 @@ async def run_edit(directory, label, prompt, phase='work'):
             return
         spec, _ = resolve_phase(request, caller.profiles, name)
         references = read_references(files, request)
-        packed = contextpack.pack(snapshots, request.task, contextpack.budget_chars(spec.context, spec.output_limit, len(system) + len(prompt) + 400), references, focus)
+        extra_targets=[('mapping',m.old) for m in request.literal_mappings]
+        packed = contextpack.pack(snapshots, request.task, contextpack.budget_chars(spec.context, spec.output_limit, len(system) + len(prompt) + 400), references, focus,extra_targets)
         (directory / (label + '.context.json')).write_text(json.dumps(packed.report))
         (directory / (label + '.context.json')).chmod(0o600)
         pairs = mappings.extract(request.task)
@@ -273,7 +343,7 @@ async def run_edit(directory, label, prompt, phase='work'):
             return gen
         def pack_for(view, unit_task, header):
             budget = contextpack.budget_chars(spec.context, spec.output_limit, len(system) + len(header) + 400)
-            return contextpack.pack(view, unit_task, budget, references, focus)
+            return contextpack.pack(view, unit_task, budget, references, focus,extra_targets)
 
         async def run_unit(unit_task, scope, unit_prompt, index):
             """One bounded task over `scope`: generate, continue after a cut-off reply, one corrective turn. Clean results are staged; returns errors."""
@@ -322,6 +392,10 @@ async def run_edit(directory, label, prompt, phase='work'):
         errors = await run_unit(request.task, list(snapshots), prompt, 0)
         state['unit_log'].append({'index': 0, 'files': list(snapshots), 'ok': not errors})
         changed = []
+        if staged and not errors and request.literal_mappings:
+            verification=mappings.verify_literals(request.literal_mappings,{p:s[1] or '' for p,s in snapshots.items()},
+                                                  {p:staged.get(p,s[1] or '') for p,s in snapshots.items()})
+            errors += [f"{m.get('path') or 'mapping'}: {m['reason']}" for m in verification['unmet']]
         if staged and not errors:
             changed, errors = textedit.commit(files, staged, snapshots)
         flush(errors, changed)

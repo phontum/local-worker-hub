@@ -12,16 +12,17 @@ export default function App() {
   const [samples, setSamples] = useState<Sample[]>([]), [selected, setSelected] = useState<string | null>(null);
   const [events, setEvents] = useState<Event[]>([]), [paired, setPaired] = useState(true);
   const [detail, setDetail] = useState<Job | null>(null), [stats, setStats] = useState(false);
+  const [statsPeriod, setStatsPeriod] = useState<'since_reset' | 'today' | 'all'>('since_reset');
   const [view, setViewState] = useState<View>(() => location.hash === '#chat' ? 'chat' : 'tasks');
   const [code, setCode] = useState(''), [error, setError] = useState(''), [filter, setFilter] = useState('all'), [busy, setBusy] = useState(false);
   usePoll(async signal => {
     try {
       const options = { signal };
-      const [j, s, h] = await Promise.all([api<Job[]>('/api/jobs?view=compact', options), api<Summary>('/api/summary', options), api<Sample[]>('/api/hardware', options)]);
+      const [j, s, h] = await Promise.all([api<Job[]>('/api/jobs?view=compact', options), api<Summary>(`/api/summary?period=${statsPeriod}&include_eval=false`, options), api<Sample[]>('/api/hardware', options)]);
       if (signal.aborted) return;
       setJobs(j); setSummary(s); setSamples(h); setPaired(true); setError('');
     } catch (e) { if (!signal.aborted) { const m = (e as Error).message; if (m === 'pair') setPaired(false); else setError(m); } }
-  }, 3000);
+  }, 3000, [statsPeriod]);
   const cursor = useRef(0);
   useEffect(() => { cursor.current = 0; setEvents([]); setDetail(null); }, [selected]);  // declared before the poll below so it resets first
   usePoll(async signal => {
@@ -58,6 +59,6 @@ export default function App() {
       view === 'chat' ? <main className="work chat-view"><Chat onOpenJob={openJob} /></main> :
       <main className="work"><JobList jobs={jobs} selected={selected} filter={filter} onFilter={setFilter} onSelect={setSelected} />
         <JobDetail job={job} events={events} busy={busy} onCancel={cancel} /></main>}
-    {stats && <StatsDrawer summary={summary} sample={sample} history={history} onClose={() => setStats(false)} />}
+    {stats && <StatsDrawer summary={summary} period={statsPeriod} onPeriod={p => { setSummary(null); setStatsPeriod(p); }} sample={sample} history={history} onClose={() => setStats(false)} />}
   </div>;
 }

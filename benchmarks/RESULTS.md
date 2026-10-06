@@ -1,3 +1,36 @@
+# Improvement acceptance — 2026-10-06
+
+Twelve paired disposable fixtures exercised the live service after the measurement
+and correctness improvements. Each arm began with identical files. The frontier
+inspected outputs, source evidence and exact candidate contents, then recorded
+eleven acceptances and one rejection.
+
+| Category | Accepted / exercises | Median delegated wall time | Local input / output tokens |
+| --- | ---: | ---: | ---: |
+| Deterministic validation | 4 / 4 | 0.588s | 0 / 0 |
+| Exact literal edits | 4 / 4 | 0.630s | 0 / 0 |
+| Scoped investigation | 3 / 4 | 7.250s | 2,975 / 946 |
+
+Validation included a deliberate nonzero exit, a missing requested suite and
+zero discovered tests. Acceptance means accurate evidence, including expected
+failures. Edits included replacing both CSS transitions, changing a return value,
+preserving an old substring inside its replacement, and safely blocking a count
+mismatch without writing. Caller investigation found the direct backup caller;
+other investigations correctly identified a tuple/exception contract and the
+first-block-only behavior.
+
+The SQL investigation explained the deduplication key correctly but omitted its
+required evidence checklist. The host marked it PARTIAL and frontier acceptance
+was rejected (`context_missing`); this failure is retained rather than repaired
+out of the benchmark. No model-generated editor patch was promoted by this pilot.
+
+This measures integration correctness and machine overhead on small fixtures.
+Matched complete-task frontier usage and effort remain unavailable, so net
+frontier savings are unmeasured. The private evidence and measurement sheet are
+in `/tmp/frontier-work-pilot-20261006-live`; durable job evidence and reviews remain
+in private Local Worker state. See [measurement instructions](../docs/MEASUREMENT.md)
+before interpreting or repeating this pilot.
+
 # Improvement acceptance — 2026-10-02
 
 Six controlled fixtures compared frontier-directed native tool operations with

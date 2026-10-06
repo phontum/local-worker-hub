@@ -153,24 +153,42 @@ def signatures(path, text):
     heads = [(start, rows[start - 1].rstrip()) for name, kind, start, end in analyze(path, text)['defs'] if kind != 'property']
     return [f'{start}: {row[:140]}' for start, row in sorted(set(heads))[:60]]
 
-def pack_references(references, room):
+def pack_references(references, room, task=''):
     blocks, report = [], []
     for path, text, digest in references or []:
         label = f'===== REFERENCE (read-only, not editable): {path}'
         rows = text.split('\n')
-        if len(text) <= min(room, MAX_REFERENCE):
-            block, mode = f'{label} ({len(rows)} lines) =====\n{text}\n===== end of {path} =====', 'whole'
+        whole = f'{label} ({len(rows)} lines) =====\n{text}\n===== end of {path} ====='
+        required = [(name, start, end) for name, kind, start, end in analyze(path, text)['defs']
+                    if kind not in ('variable', 'property') and re.search(r'\b' + re.escape(name) + r'\b', task)]
+        omitted = []
+        if len(whole) <= room:
+            block, mode = whole, 'whole'
+        elif required:
+            # A test needs the implementation and return contract, not just its signature.
+            keep = set()
+            available = max(0, room - len(label) - len(path) - 200)
+            for name, start, end in required:
+                fresh = set(range(start - 1, min(end, len(rows)))) - keep
+                cost = sum(len(rows[i]) + 1 for i in fresh)
+                if cost <= available:
+                    keep.update(fresh); available -= cost
+                else:
+                    omitted.append(name)
+            body = '\n'.join(f'{i + 1}: {rows[i]}' for i in sorted(keep))
+            block = f'{label} ({len(rows)} lines; relevant bodies only) =====\n{body}\n===== end of {path} ====='
+            mode = 'bodies'
         else:
             sigs = signatures(path, text)
             body = '\n'.join(sigs) if sigs else '\n'.join(rows[:40])
             mode = 'signatures' if sigs else 'head'
             block = f'{label} ({len(rows)} lines; {mode} only) =====\n{body[:min(room, MAX_REFERENCE)]}\n===== end of {path} ====='
-        if len(block) > room:
-            report.append({'path': path, 'mode': 'skipped', 'chars': 0, 'sha256': digest})
+        if len(block) > room or (mode == 'bodies' and not keep):
+            report.append({'path': path, 'mode': 'skipped', 'chars': 0, 'sha256': digest, 'omitted_symbols': [name for name, _, _ in required]})
             continue
         blocks.append(block)
         room -= len(block)
-        report.append({'path': path, 'mode': mode, 'chars': len(block), 'sha256': digest})
+        report.append({'path': path, 'mode': mode, 'chars': len(block), 'sha256': digest, 'omitted_symbols': omitted})
     return blocks, report
 
 def coverage(snapshots, targets, texts):
@@ -190,14 +208,16 @@ def coverage(snapshots, targets, texts):
             hidden.append(text)
     return {'named': len(targets), 'found': len(found_any), 'missing_mappings': missing, 'hidden': hidden}
 
-def pack(snapshots, task, budget, references=None, focus=None):
+def pack(snapshots, task, budget, references=None, focus=None, extra_targets=()):
     """The authorized files plus read-only references as prompt text, and a report of what was shown."""
-    targets = named_targets(task)
+    targets = list(extra_targets) + named_targets(task)
     ref_estimate = min(sum(min(len(t), MAX_REFERENCE) for _, t, _ in references or []), int(budget * 0.25))
     texts, shown = pack_files(snapshots, task, budget - ref_estimate, targets, focus)
     used = sum(len(v) for v in texts.values())
-    blocks, ref_report = pack_references(references, max(0, budget - used))
+    blocks, ref_report = pack_references(references, max(0, budget - used), task)
     text = '\n\n'.join(list(texts.values()) + blocks)
+    omissions=[f"{ref['path']}: {', '.join(ref['omitted_symbols'])}" for ref in ref_report if ref.get('omitted_symbols')]
+    if omissions:text+='\nRequired reference bodies not shown: '+'; '.join(omissions)+'. Do not infer their contracts; report missing context.'
     report = {'budget_chars': budget, 'used_chars': len(text), 'files': shown, 'references': ref_report, 'coverage': coverage(snapshots, targets, texts), 'focus': {p: [list(r) for r in rs] for p, rs in (focus or {}).items() if p in snapshots}}
     return Packed(text, report)
 

@@ -41,7 +41,7 @@ class AnalysisRequest(BaseModel):
 
 
 def artifact_path(ident, name):
-    allowed={'ask.json','report.txt','draft-report.txt','answer-review.json','work.web-verification.json','answer-review.web-verification.json','work.research-plan.json','answer-review.research-plan.json','scoped-diff.txt','patch.diff','job.diff','staged.diff','before-status.txt','after-status.txt','before-diff.txt','after-diff.txt','before-staged.txt','after-staged.txt'}
+    allowed={'ask.json','report.txt','draft-report.txt','answer-review.json','work.investigation.json','investigate.investigation.json','work.web-verification.json','answer-review.web-verification.json','work.research-plan.json','answer-review.research-plan.json','scoped-diff.txt','patch.diff','job.diff','staged.diff','before-status.txt','after-status.txt','before-diff.txt','after-diff.txt','before-staged.txt','after-staged.txt'}
     if name not in allowed and not re.fullmatch(r'check-(?:\d+-)?\d+\.log',name) and not re.fullmatch(r'board-[a-z0-9.-]+\.(?:json|txt)',name):
         raise HTTPException(403,'Only reports, diffs and check outputs are exposed')
     path=STATE/'jobs'/ident/name
@@ -380,7 +380,28 @@ def create_app(store=None, start_workers=True):
         return {'models':[{'alias':alias,'name':value['name'],'installed':probe(value['name'],2).get('installed')} for alias,value in registered_models().items()]}
 
     @app.get('/api/summary',dependencies=[Depends(auth)])
-    def summary():return store.summary()
+    def summary(since:float | None=Query(default=None,ge=0,allow_inf_nan=False),
+                until:float | None=Query(default=None,ge=0,allow_inf_nan=False),
+                include_eval:bool=True, include_history:bool=True,
+                period:Literal['today','since_reset','all'] | None=None):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        from .skills.personal.preferences import load
+        timezone=load()['timezone']
+        try:now=datetime.now(ZoneInfo(timezone))
+        except (ZoneInfoNotFoundError,ValueError):
+            timezone='UTC';now=datetime.now(ZoneInfo(timezone))
+        today=now.replace(hour=0,minute=0,second=0,microsecond=0).timestamp()
+        if period:
+            if since is not None or until is not None:
+                raise HTTPException(422,'Use period or explicit time bounds')
+            include_history=period!='since_reset'
+            if period=='today':since=today
+        try:value=store.summary(since,until,include_eval,include_history)
+        except ValueError as error:raise HTTPException(422,str(error)) from error
+        day=store.summary(today,None,include_eval,True)
+        value['today']={'jobs':day['jobs'],'usage':day['usage'],'api_equivalent_usd':day['api_equivalent_usd'],'since':today,'timezone':timezone}
+        return value
 
     @app.get('/api/hardware',dependencies=[Depends(auth)])
     def hardware():return store.samples()

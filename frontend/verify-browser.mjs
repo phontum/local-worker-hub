@@ -46,6 +46,17 @@ try {
  // The Stats drawer holds the savings and workflow figures that no longer crowd the main screen.
  await page.getByRole('button',{name:'Stats',exact:true}).click();
  await page.getByText('Frontier accepted',{exact:true}).waitFor();
+ const period=page.getByLabel('Statistics period');
+ assert.equal(await period.inputValue(),'since_reset');
+ await page.getByText('Review coverage:',{exact:false}).waitFor();
+ for(const value of ['today','all','since_reset']){
+  const response=page.waitForResponse(r=>r.url().includes(`/api/summary?period=${value}&include_eval=false`)&&r.ok());
+  await period.selectOption(value);
+  const summary=await (await response).json();
+  assert.equal(summary.selection.include_eval,false);
+  assert.ok(summary.today.timezone);
+ }
+ await page.screenshot({path:'/tmp/local-worker-stats-desktop.png'});
  await page.getByRole('button',{name:'Close',exact:true}).click();
  // One screen: the page itself must not scroll at common laptop sizes, even with a long job selected.
  for(const [width,height] of [[1440,900],[1366,768]]){
@@ -56,6 +67,10 @@ try {
  assert.equal(await page.evaluate(()=>document.cookie.includes('worker_session')),false);
  await page.screenshot({path:'/tmp/local-worker-dashboard-desktop.png'});
  await page.setViewportSize({width:390,height:844});
+ await page.getByRole('button',{name:'Stats',exact:true}).click();
+ await page.getByLabel('Statistics period').waitFor();
+ await page.screenshot({path:'/tmp/local-worker-stats-mobile.png',fullPage:true});
+ await page.getByRole('button',{name:'Close',exact:true}).click();
  await page.screenshot({path:'/tmp/local-worker-dashboard-mobile.png',fullPage:true});
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
  assert.deepEqual(errors,[]);
