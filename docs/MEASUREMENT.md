@@ -15,11 +15,63 @@ submitted today. Validators use zero model tokens by default, so extensive test
 execution can leave this figure unchanged. It is not subscription savings.
 
 Frontier tokens avoided remains unmeasured until a review records a matched
-direct-frontier baseline and the delegated-frontier total. Include orchestration,
-review, retries and takeover in the delegated total. Put one baseline on a handoff;
-use the same `handoff_id` for its follow-ups. Preserve negative savings. Manual
-estimates remain separate from measured baselines. Record actual review effort
-where available; never replace unknown usage with an invented zero.
+direct-frontier baseline and the delegated-frontier total. Include
+orchestration, review, retries and takeover in the delegated total. Put one
+baseline on a handoff; use the same `handoff_id` for its follow-ups.
+Preserve negative savings. Manual estimates remain separate from measured
+baselines. Record actual review effort where available; never replace unknown
+usage with an invented zero.
+
+Observed paired economics: `record_review` accepts `baseline_usage` and
+`delegated_usage` dictionaries; CLI review accepts `--economics-file` JSON
+object containing only those two keys. Each usage requires client (`claude` or `codex`), model,
+configuration_ref, independent measurement_ref, total_tokens (observed full
+task total including orchestration/review/retries/takeover), and wall_seconds;
+optional input_tokens/output_tokens/cache_read_tokens/cache_write_tokens/
+reasoning_tokens/effort_seconds, null when unknown. Totals are client-supplied,
+not summed from overlapping counters. A pair requires same client/model/
+configuration_ref plus task_outcome and review_effort_seconds, with
+`measurement_source=measured`. Existing baseline_frontier_tokens/delegated_frontier_tokens
+are derived and conflicting supplied totals are rejected. Store one pair per
+handoff; summary paired_economics reports pair count by client, wall/effort
+differences preserving negatives; dataset includes usage.
+
+Illustrative JSON object (replace with actual observations; these numbers are not results):
+
+```json
+{
+  "baseline_usage": {
+    "client": "claude",
+    "model": "claude-3-5-sonnet",
+    "configuration_ref": "ref-1",
+    "measurement_ref": "meas-1",
+    "total_tokens": 1000,
+    "wall_seconds": 10.5
+  },
+  "delegated_usage": {
+    "client": "claude",
+    "model": "claude-3-5-sonnet",
+    "configuration_ref": "ref-1",
+    "measurement_ref": "meas-2",
+    "total_tokens": 5000,
+    "wall_seconds": 60.0
+  }
+}
+```
+
+CLI example (save the JSON in a private file):
+
+```sh
+local-worker review JOB_ID accepted --economics-file /private/economics.json \
+  --task-outcome completed --review-effort-seconds 12
+```
+
+Measurements are caller-supplied observations from each client's usage receipts;
+the hub does not automatically capture frontier sessions. Use full-task receipt
+ranges and retain the referenced evidence privately. Record configuration settings
+under `configuration_ref` so the pair can be independently audited. No paired
+observations or savings are implied by this infrastructure.
+
 
 The summary API accepts `since` (inclusive), `until` (exclusive), `include_eval`
 and `include_history`. `include_history=false` applies the reset when `since` is
@@ -72,14 +124,17 @@ or a reviewed profile. No commands or permissions are inferred.
 
 ## Evidence and the twelve-task pilot
 
-Investigator reports quote observed source beside location references. Explain,
-compare and requirement tasks include a checklist anchored to literal task text.
-Unknown requirements, missing reads and unresolved additional ranges produce
-PARTIAL. Exhaustive/caller questions enumerate bounded name-based reference hits
-and show any unread sites. A checked source location does not establish semantic
-correctness; frontier review remains required. The authenticated
-`work.investigation.json` artifact contains scope, read ranges, reference coverage,
-the checklist and unknowns.
+Investigator reports quote observed source beside location references.
+The host writes one anchor containing the entire exact original task, with id
+`task`, and evidence rows containing verified locations and observed source. It
+does not split or semantically assess individual questions. The model returns
+answer, refs, complete/more/unknowns; no requirements or
+task_quote checklist. Coverage is reported as reported_complete/unresolved
+(not a host semantic verdict). A checked source location does not establish
+semantic correctness; frontier review remains required. The authenticated
+`work.investigation.json` artifact contains scope, read ranges, reference
+coverage, the host-owned task anchor, and unknowns. Explicit unknowns, unread
+required references, unresolved ranges and truncated output still prevent COMPLETE.
 
 Run the pilot only after starting the service with the new code:
 
@@ -100,3 +155,11 @@ task effort/usage, and review correctness independently. Direct tool seconds are
 machine timings and must not be entered as frontier effort. Missing frontier
 measurements stay null. This tool pilot alone cannot establish net frontier
 savings. Evaluate per-category paired differences before expanding delegation.
+
+## Expanding Tier 0 from real usage
+
+Add a deterministic capability only after recurring real reviewed jobs establish
+that the task is common and admits an exact, guarded implementation. Literal
+replacement is the precedent. LSP rename, import insertion and validated config
+updates remain candidates; this change adds none of them. Use recorded task kinds,
+acceptance/takeover reasons and final outcomes as evidence before choosing a slice.

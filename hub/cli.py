@@ -200,6 +200,7 @@ def main():
         p.add_argument('--timeout-seconds',type=int,default=25)
         p.add_argument('--task-outcome',choices=['completed','partial','blocked'])
         p.add_argument('--review-effort-seconds',type=int)
+        p.add_argument('--economics-file',help='JSON object containing observed baseline_usage/delegated_usage')
         for name in ('baseline-frontier-tokens','delegated-frontier-tokens','baseline-frontier-cost','delegated-frontier-cost'):
             p.add_argument('--'+name,type=float if name.endswith('cost') else int)
         args=p.parse_args()
@@ -207,7 +208,10 @@ def main():
                 'cancel':'/cancel','review':'/review','wait':'/wait?'+urlencode({'timeout_seconds':args.timeout_seconds})}[command]
         if command=='review':
             from .models import Review
-            data=Review(decision=args.decision,notes=args.notes,reason=args.reason,measurement_source=args.measurement_source,
+            economics=json.loads(Path(args.economics_file).read_text()) if args.economics_file else {}
+            if not isinstance(economics,dict) or set(economics)-{'baseline_usage','delegated_usage'}:
+                p.error('economics-file must contain only baseline_usage and delegated_usage')
+            data=Review(**economics,decision=args.decision,notes=args.notes,reason=args.reason,measurement_source=args.measurement_source,
                        task_outcome=args.task_outcome,review_effort_seconds=args.review_effort_seconds,
                        **{n:getattr(args,n) for n in ('baseline_frontier_tokens','delegated_frontier_tokens','baseline_frontier_cost','delegated_frontier_cost')}).model_dump()
         else:data=None

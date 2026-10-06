@@ -158,12 +158,23 @@ def create_server():
     def record_review(job_id: str, decision: str, notes: str='', baseline_frontier_tokens: int | None=None,
                       delegated_frontier_tokens: int | None=None, baseline_frontier_cost: float | None=None,
                       delegated_frontier_cost: float | None=None, measurement_source: str='measured',
-                      task_outcome: str | None=None, review_effort_seconds: int | None=None, reason: str | None=None) -> dict:
-        """Record frontier acceptance/rejection/takeover. A rejected or takeover review must say why in notes (at least 10 characters) and should give a reason (truncated, wrong_edit, oversized, no_change, check_failed, scope, wrong_localization, context_missing, other): real failures become regression cases. Baselines must include orchestration, review, retries and takeover usage."""
+                      task_outcome: str | None=None, review_effort_seconds: int | None=None, reason: str | None=None,
+                      baseline_usage: dict | None=None, delegated_usage: dict | None=None) -> dict:
+        """Record frontier acceptance/rejection/takeover. A rejected or takeover review must say why in notes (at least 10 characters) and should give a reason (truncated, wrong_edit, oversized, no_change, check_failed, scope, wrong_localization, context_missing, other): real failures become regression cases. Baselines must include orchestration, review, retries and takeover usage.
+
+        Optional baseline_usage/delegated_usage hold observed full-task receipts:
+        client (claude/codex), model, configuration_ref, measurement_ref,
+        total_tokens, wall_seconds; optional input/output/cache_read/cache_write/
+        reasoning_tokens and effort_seconds. Unknown counters stay null. A pair
+        needs the same client/model/configuration, independent receipt references,
+        measured source, final task_outcome and review_effort_seconds. Totals are
+        supplied by the client, not summed from overlapping token counters.
+        """
         review=Review(decision=decision,notes=notes,baseline_frontier_tokens=baseline_frontier_tokens,
             delegated_frontier_tokens=delegated_frontier_tokens,baseline_frontier_cost=baseline_frontier_cost,
             delegated_frontier_cost=delegated_frontier_cost,measurement_source=measurement_source,
-            task_outcome=task_outcome,review_effort_seconds=review_effort_seconds,reason=reason)
+            task_outcome=task_outcome,review_effort_seconds=review_effort_seconds,reason=reason,
+            baseline_usage=baseline_usage,delegated_usage=delegated_usage)
         job=call('POST',job_path(job_id)+'/review',review.model_dump())
         return {'id':job['id'],'review':job['review']}
 

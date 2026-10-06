@@ -248,6 +248,27 @@ class AnswerReview(BaseModel):
 
 REVIEW_REASONS = ('truncated', 'wrong_edit', 'oversized', 'no_change', 'check_failed', 'scope', 'wrong_localization', 'context_missing', 'other')
 
+class FrontierUsage(BaseModel):
+    """Full-task observations include orchestration, review, retries and takeover.
+
+    The client supplies totals: cache/reasoning counters may overlap other counters.
+    Unknown counters remain null; do not embed transcripts or raw receipts.
+    """
+    model_config = ConfigDict(extra='forbid')
+    client: Literal['claude', 'codex']
+    model: str = Field(min_length=1, max_length=200)
+    measurement_ref: str = Field(min_length=1, max_length=300)
+    configuration_ref: str = Field(min_length=1, max_length=300)
+    total_tokens: int = Field(ge=0)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    cache_read_tokens: int | None = Field(default=None, ge=0)
+    cache_write_tokens: int | None = Field(default=None, ge=0)
+    reasoning_tokens: int | None = Field(default=None, ge=0)
+    wall_seconds: float = Field(ge=0, allow_inf_nan=False)
+    effort_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+
 class Review(BaseModel):
     decision: Literal['accepted', 'rejected', 'takeover']
     notes: str = Field(default='', max_length=4000)
@@ -259,9 +280,27 @@ class Review(BaseModel):
     measurement_source: Literal['measured', 'manual_estimate'] = 'measured'
     task_outcome: Literal['completed', 'partial', 'blocked'] | None = None
     review_effort_seconds: int | None = Field(default=None, ge=0)
+    baseline_usage: FrontierUsage | None = None
+    delegated_usage: FrontierUsage | None = None
 
     @model_validator(mode='after')
     def say_why(self):
+        for arm in ('baseline', 'delegated'):
+            usage = getattr(self, arm + '_usage')
+            if usage:
+                if self.measurement_source != 'measured':
+                    raise ValueError('Observed usage requires measurement_source=measured')
+                name = arm + '_frontier_tokens'
+                if getattr(self, name) not in (None, usage.total_tokens):
+                    raise ValueError(name + ' conflicts with observed usage')
+                setattr(self, name, usage.total_tokens)
+        if self.baseline_usage and self.delegated_usage:
+            if (self.baseline_usage.client, self.baseline_usage.model, self.baseline_usage.configuration_ref) != (self.delegated_usage.client, self.delegated_usage.model, self.delegated_usage.configuration_ref):
+                raise ValueError('Paired usage requires the same client, model and configuration')
+            if self.baseline_usage.measurement_ref == self.delegated_usage.measurement_ref:
+                raise ValueError('Paired usage requires independent measurement references')
+            if not self.task_outcome or self.review_effort_seconds is None:
+                raise ValueError('Paired usage requires final task_outcome and review_effort_seconds')
         # A rejection or takeover with no reason cannot become a regression case; require it on input (stored reviews are untouched).
         if self.decision in ('rejected', 'takeover') and (len(self.notes.strip()) < 10 or not self.reason):
             raise ValueError('A rejected or takeover review needs notes (at least 10 characters) saying what went wrong and a reason code: ' + ', '.join(REVIEW_REASONS))

@@ -199,6 +199,8 @@ class Store:
         measured = [j for j in matched if j['review'].get('measurement_source','measured')=='measured']
         savings = sum(j['review']['baseline_frontier_tokens']-j['review']['delegated_frontier_tokens'] for j in measured)
         money = [j for j in jobs if j['review'] and j['review'].get('measurement_source','measured')=='measured' and j['review'].get('baseline_frontier_cost') is not None and j['review'].get('delegated_frontier_cost') is not None]
+        pairs = [j['review'] for j in measured if j['review'].get('baseline_usage') and j['review'].get('delegated_usage')]
+        paired_effort = [r for r in pairs if all(r[a].get('effort_seconds') is not None for a in ('baseline_usage', 'delegated_usage'))]
         reviewed=sum(bool(j['review']) for j in jobs)
         effort=sum((j.get('review') or {}).get('review_effort_seconds') is not None for j in jobs)
         return {'jobs':len(jobs),'reviewed':reviewed,'accepted':sum(bool(j['review'] and j['review']['decision']=='accepted') for j in jobs),
@@ -209,4 +211,9 @@ class Store:
             'manual_estimate_baselines':len(matched)-len(measured),
             'estimated_frontier_tokens_avoided':savings if measured else None,
             'estimated_frontier_cost_avoided':sum(j['review']['baseline_frontier_cost']-j['review']['delegated_frontier_cost'] for j in money) if money else None,
+            'paired_economics': {'pairs':len(pairs),
+                'by_client':{client:sum(r['baseline_usage']['client']==client for r in pairs) for client in ('claude','codex')},
+                'wall_seconds_avoided':sum(r['baseline_usage']['wall_seconds']-r['delegated_usage']['wall_seconds'] for r in pairs) if pairs else None,
+                'effort_pairs':len(paired_effort),
+                'effort_seconds_avoided':sum(r['baseline_usage']['effort_seconds']-r['delegated_usage']['effort_seconds'] for r in paired_effort) if paired_effort else None},
             'subscription_dollars_saved':None}

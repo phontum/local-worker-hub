@@ -35,22 +35,16 @@ class Ref(BaseModel):
     model_config = ConfigDict(extra='forbid')
     path: str = Field(max_length=300)
     line: int
-    note: str = Field(max_length=200)
-
-class RequirementFinding(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    task_quote: str = Field(min_length=1,max_length=600)
-    status: str = Field(pattern=r'^(met|unmet|unknown)$')
-    refs: list[Ref] = Field(default_factory=list,max_length=8)
+    note: str = Field(default='supporting location', max_length=200)
 
 class Finding(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    # Legacy checklist fields are ignored; anchors and evidence belong to the host.
+    model_config = ConfigDict(extra='ignore')
     answer: str = Field(max_length=6000)
     refs: list[Ref] = Field(default_factory=list, max_length=24)
-    complete: bool
-    more: list[Range] = Field(max_length=4)
-    requirements: list[RequirementFinding] = Field(default_factory=list,max_length=20)
-    unknowns: list[str] = Field(default_factory=list,max_length=12)
+    complete: bool = False
+    more: list[Range] = Field(default_factory=list, max_length=4)
+    unknowns: list[str] = Field(default_factory=list, max_length=12)
 
 PICK = ('You are investigating a code repository to answer the question. Choose up to 6 file ranges to read (path exactly as listed, '
         'start and end line, at most 120 lines each). Candidate ranges come from the host code index (definitions, uses, imports, best first) '
@@ -59,8 +53,8 @@ ANSWER = ('Answer the question from the file excerpts. Put every supporting loca
           'excerpts; a short note); the host checks each against what was read. When asked to find all code involved, list every relevant location '
           'shown, including configuration, callers and importers. For a requirement or yes/no question start the answer with met, unmet or unknown. '
           'Say plainly what you could not find. Set complete=false when any requirement or part of the question is unknown or unverified, or when other ranges are needed (list them in more); '
-          'otherwise complete=true and more empty. For explain, compare and check_requirement tasks, include requirements for every explicit question: '
-          'task_quote is copied exactly from the original task, status is met/unmet/unknown, refs locate supporting implementation (not just names or test descriptions). '
+          'otherwise complete=true and more empty. The host owns task anchors and evidence rows; do not return requirements or task quotes. '
+          'Refs locate supporting implementation (not just names or test descriptions). '
           'Return unknowns explicitly. Separate observed definitions, callers and branch conditions from your interpretation. A repository-wide absence or all-callers claim '
           'requires the relevant search scope and callers to be inspected; excerpts alone do not prove absence. Do not infer return types or iteration behavior from names.')
 HOST_BUDGET = 26000
@@ -156,7 +150,7 @@ async def run_investigate(directory, label, prompt, phase='work'):
             cut = '; '.join(sorted({g.cut_off_message for g in caller.truncations}))
             content = envelope('PARTIAL', 'No usable answer was produced.' + (' The model output was cut off.' if cut else ''), risks=cut or 'The local model returned no answer.')
         else:
-            refs=finding.refs+[ref for req in finding.requirements for ref in req.refs]
+            refs=finding.refs
             good, bad = verified_refs(files, refs, finding.answer)
             # The host owns the quoted source; model notes are interpretations, not verified evidence.
             def observed(path,line):
@@ -171,11 +165,7 @@ async def run_investigate(directory, label, prompt, phase='work'):
             risks = []
             strict=request.kind in ('explain','compare','check_requirement')
             unresolved=list(finding.unknowns)
-            if strict and not finding.requirements:unresolved.append('No requirement evidence checklist was returned')
-            for req in finding.requirements:
-                locations,_=verified_refs(files,req.refs)
-                if req.task_quote not in request.task or req.status=='unknown' or not locations:
-                    unresolved.append(req.task_quote)
+            if caller.truncations:unresolved.append('Model output was truncated')
             if finding.more:unresolved.append('Additional requested ranges remain unresolved')
             if strict and (errors or bad):unresolved.append('Required reads or references remain unverified')
             missing_hits=[h for h in reference_hits if h['line'] not in files.observed_lines.get(h['path'],{}).get('lines',{})]
@@ -192,7 +182,10 @@ async def run_investigate(directory, label, prompt, phase='work'):
             scope=', '.join(request.read_paths) if request.read_paths else 'repository (scoped guards apply)'
             packet={'search_scope':scope,'reference_precision':'name_based','reference_hits':reference_hits,'unread_reference_hits':missing_hits,
                     'read_ranges':[{'path':e['path'],'start':e.get('start'),'lines':e.get('lines','').count('\n')+1} for e in files.evidence if e.get('path') and e.get('lines')],
-                    'requirements':[req.model_dump() for req in finding.requirements],'unknowns':unresolved,'semantic_verification':'frontier_required'}
+                    'requirements':[{'id':'task', 'task_quote':request.task,
+                                     'coverage':'reported_complete' if finding.complete and good and not unresolved else 'unresolved',
+                                     'refs':[{'path':p,'line':n,'observed':observed(p,n)} for p,n,_ in good]}],
+                    'structure_owner':'host','unknowns':unresolved,'semantic_verification':'frontier_required'}
             artifact=directory/(label+'.investigation.json');artifact.write_text(json.dumps(packet));artifact.chmod(0o600)
             content = envelope('COMPLETE' if finding.complete and good and not unresolved else 'PARTIAL', finding.answer.strip() + evidence + '\n\nSearch scope: '+scope,
                                risks='; '.join(risks) if risks else 'None identified.')

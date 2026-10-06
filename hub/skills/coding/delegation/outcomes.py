@@ -96,7 +96,10 @@ def row(job, directory=None):
             'model': result.get('model') or request.get('model') or 'unrecorded', 'context_files': len(context.get('files', [])) if isinstance(context, dict) else None,
             'worker_status': result.get('worker_status'), 'diff': packet.get('diff'), 'scope_ok': packet.get('scope_ok'),
             'execution_seconds': metrics.get('execution_seconds'), 'local_tokens': (usage.get('input', 0) or 0) + (usage.get('output', 0) or 0) if isinstance(usage, dict) and usage else None,
-            'decision': review.get('decision'), 'reason': review.get('reason'), 'review_effort_seconds': review.get('review_effort_seconds')}
+            'decision': review.get('decision'), 'reason': review.get('reason'), 'review_effort_seconds': review.get('review_effort_seconds'),
+            'task_outcome': review.get('task_outcome'), 'measurement_source': review.get('measurement_source'),
+            'baseline_usage': review.get('baseline_usage'), 'delegated_usage': review.get('delegated_usage'),
+            'baseline_frontier_tokens': review.get('baseline_frontier_tokens'), 'delegated_frontier_tokens': review.get('delegated_frontier_tokens')}
 
 def stats(jobs, include_eval=False):
     """Acceptance by (role, kind) over reviewed jobs: how often the frontier accepted, rejected or took over."""

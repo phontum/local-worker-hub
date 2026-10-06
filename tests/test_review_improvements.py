@@ -226,3 +226,63 @@ def test_pilot_keeps_missing_measurements_unknown_and_negative_totals():
     rows=[{'baseline_frontier_tokens':10,'delegated_frontier_tokens':20,'baseline_frontier_effort_seconds':2,'delegated_frontier_effort_seconds':7}]
     assert measurement_summary(rows)['frontier_tokens_avoided']==-10
     assert measurement_summary(rows)['frontier_effort_seconds_avoided']==-5
+
+
+@pytest.mark.asyncio
+async def test_investigator_host_owns_checklist_even_if_model_returns_malformed_quotes(tmp_path,repo,monkeypatch):
+    directory=tmp_path/'host-job';directory.mkdir();(directory/'workspace').mkdir()
+    task='Explain answer in app.ts and state its value.'
+    q=JobRequest(role='investigator',kind='explain',repo=str(repo),read_paths=['app.ts'],task=task,idempotency_key='host')
+    (directory/'request.json').write_text(q.model_dump_json())
+    outputs=[{'ranges':[{'path':'app.ts','start':1,'end':1}]}, {'answer':'The constant is 41 (app.ts:1).','complete':True,
+                            'requirements':'broken legacy checklist'}]
+    async def call(*args,**kwargs):return {'message':{'content':json.dumps(outputs.pop(0))}}
+    monkeypatch.setattr(calls,'call',call)
+    await pipelines.run_investigate(directory,'work',task)
+    packet=json.loads((directory/'work.investigation.json').read_text())
+    assert packet['structure_owner']=='host'
+    assert packet['requirements'][0]['task_quote']==task
+    assert packet['requirements'][0]['coverage']=='reported_complete'
+    assert packet['requirements'][0]['refs'][0]['observed']=='export const answer = 41;'
+    assert final_report(json.loads((directory/'work.session.json').read_text()))['status']=='COMPLETE'
+    assert 'requirements' not in pipelines.Finding.model_json_schema()['properties']
+
+
+def usage(arm, tokens=100, **changes):
+    return {'client':'codex','model':'frontier-test','configuration_ref':'config-test',
+            'measurement_ref':arm, 'total_tokens':tokens,'wall_seconds':10, **changes}
+
+
+def test_paired_economics_retains_full_usage_and_negative_results(store,repo,tmp_path):
+    job=completed(store,repo,'pair')
+    review=Review(decision='takeover',reason='context_missing',notes='Frontier completed the missing work',
+                  baseline_usage=usage('direct',100,wall_seconds=4),delegated_usage=usage('delegated',150,wall_seconds=9),
+                  review_effort_seconds=3,task_outcome='completed')
+    store.review(job['id'],review)
+    saved=store.get(job['id'])
+    assert saved['review']['delegated_frontier_tokens']==150
+    assert saved['review']['delegated_usage']['reasoning_tokens'] is None
+    summary=store.summary(include_eval=False,include_history=True)
+    assert summary['estimated_frontier_tokens_avoided']==-50
+    assert summary['paired_economics']['wall_seconds_avoided']==-5
+    assert summary['paired_economics']['effort_seconds_avoided'] is None
+    assert summary['paired_economics']['by_client']=={'codex':1,'claude':0}
+    record=outcomes.dataset_record(saved,tmp_path)
+    assert record['delegated_usage']['total_tokens']==150 and record['task_outcome']=='completed'
+    assert record['frontier']['decision']=='takeover'
+
+
+@pytest.mark.parametrize('extra',[
+    {'delegated_frontier_tokens':99},
+    {'measurement_source':'manual_estimate'},
+    {'task_outcome':None},
+    {'review_effort_seconds':None},
+    {'delegated_usage':usage('delegated',client='claude')},
+    {'delegated_usage':usage('delegated',configuration_ref='different')},
+    {'delegated_usage':usage('direct')},
+    {'delegated_usage':usage('delegated',wall_seconds=float('nan'))},
+])
+def test_paired_economics_rejects_inconsistent_or_incomplete_observations(extra):
+    args={'decision':'accepted','baseline_usage':usage('direct'),'delegated_usage':usage('delegated'),
+          'task_outcome':'completed','review_effort_seconds':1, **extra}
+    with pytest.raises(ValidationError):Review(**args)

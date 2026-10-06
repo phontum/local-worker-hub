@@ -74,3 +74,36 @@ def test_tier0_tools_and_record_outcome_are_registered_read_only_where_they_shou
     for name in ('find_symbol', 'find_references', 'find_implementations', 'callers', 'callees', 'diagnostics', 'symbol_context', 'outline'):
         assert tools[name].annotations.readOnlyHint is True and 'repo' in tools[name].inputSchema['properties']
     assert 'record_outcome' in tools and 'board' not in tools['submit_job'].inputSchema['properties']
+
+
+def test_record_review_forwards_paired_usage(monkeypatch):
+    sent=[]
+    def fake_call(method,path,data):
+        sent.append(data)
+        return {'id':'a'*32,'review':data}
+    monkeypatch.setattr(mcp_adapter,'call',fake_call)
+    base={'client':'claude','model':'test','configuration_ref':'cfg','measurement_ref':'baseline',
+          'total_tokens':10,'wall_seconds':1}
+    invoke('record_review',{'job_id':'a'*32,'decision':'accepted','baseline_usage':base,
+                           'delegated_usage':dict(base,measurement_ref='delegated',total_tokens=20),
+                           'review_effort_seconds':1,'task_outcome':'completed'})
+    assert sent[0]['baseline_frontier_tokens']==10 and sent[0]['delegated_frontier_tokens']==20
+
+
+def test_cli_review_loads_economics_file(tmp_path,monkeypatch):
+    import json
+    import sys
+    from hub import cli, client
+    sent=[]
+    base={'client':'codex','model':'test','configuration_ref':'cfg','measurement_ref':'baseline',
+          'total_tokens':10,'wall_seconds':1}
+    path=tmp_path/'usage.json'
+    path.write_text(json.dumps({'baseline_usage':base,'delegated_usage':dict(base,measurement_ref='delegated')}))
+    monkeypatch.setattr(sys,'argv',['local-worker','review','a'*32,'accepted','--economics-file',str(path),
+                                 '--review-effort-seconds','1','--task-outcome','completed'])
+    def fake_call(method,url,data):
+        sent.append(data)
+        return {'id':'a'*32,'review':data}
+    monkeypatch.setattr(client,'call',fake_call)
+    cli.main()
+    assert sent[0]['baseline_usage']['client']=='codex' and sent[0]['delegated_frontier_tokens']==10
