@@ -4,7 +4,9 @@ Nothing here is a second copy of state. A row is computed from the job record (r
 rebuilt at any time, and `final_diff` is the only new artifact: it compares the authorized files as the worker's snapshot saw them with the user's tree
 now, which is what the frontier actually left behind after accepting, rejecting or taking over."""
 import difflib
+import hashlib
 import json
+import time
 from collections import defaultdict
 from pathlib import Path
 from hub.skills.coding.editing import workspace
@@ -44,11 +46,14 @@ def final_diff(job, jobs_dir=None):
             files.append({'path': name, 'added': sum(1 for l in delta if l.startswith('+') and not l.startswith('+++')),
                           'removed': sum(1 for l in delta if l.startswith('-') and not l.startswith('---'))})
     directory = Path(jobs_dir or STATE / 'jobs') / ident
+    summary = {'available': True, 'files': files, 'changed_files': len(files), 'bytes': sum(len(c) for c in chunks), 'captured': time.time()}
     if directory.is_dir():
         out = directory / 'final-frontier.diff'
         out.write_text(''.join(chunks))
         out.chmod(0o600)
-    return {'available': True, 'files': files, 'changed_files': len(files), 'bytes': sum(len(c) for c in chunks)}
+        (directory / 'final-frontier.json').write_text(json.dumps(summary))
+        (directory / 'final-frontier.json').chmod(0o600)
+    return summary
 
 def row(job, directory=None):
     """The delegation feature row: task shape, scope, context actually shown, cost and outcome. Task text and source are not copied."""
@@ -67,7 +72,7 @@ def row(job, directory=None):
             'read_files': len(request.get('read_paths', [])), 'checks': len(request.get('checks', [])), 'task_chars': len(request.get('task', '')),
             'model': request.get('model') or 'default', 'context_files': len(context.get('files', [])) if isinstance(context, dict) else None,
             'worker_status': result.get('worker_status'), 'diff': packet.get('diff'), 'scope_ok': packet.get('scope_ok'),
-            'execution_seconds': metrics.get('execution_seconds'), 'local_tokens': usage.get('total_tokens') if isinstance(usage, dict) else None,
+            'execution_seconds': metrics.get('execution_seconds'), 'local_tokens': (usage.get('input', 0) or 0) + (usage.get('output', 0) or 0) if isinstance(usage, dict) and usage else None,
             'decision': review.get('decision'), 'reason': review.get('reason'), 'review_effort_seconds': review.get('review_effort_seconds')}
 
 def stats(jobs, include_eval=False):
@@ -84,3 +89,70 @@ def stats(jobs, include_eval=False):
             entry['reasons'][review['reason']] += 1
     return [{'role': role, 'kind': kind, **{k: (dict(v) if k == 'reasons' else v) for k, v in entry.items()},
              'accept_rate': round(entry['accepted'] / entry['reviewed'], 3)} for (role, kind), entry in sorted(table.items(), key=lambda kv: (kv[0][0] or '', kv[0][1]))]
+
+
+SCHEMA = 1
+
+def read_text(path, limit=2_000_000):
+    try:
+        return Path(path).read_text(errors='replace')[:limit]
+    except OSError:
+        return None
+
+def read_json(path):
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+
+def prompt_of(directory):
+    """The user turn of the job's model session: the exact task-plus-context prompt the model saw (private source)."""
+    for name in ('work.session.json', 'edit.session.json'):
+        session = read_json(Path(directory) / name)
+        for message in (session or {}).get('messages', []):
+            if message.get('type') == 'user' and message.get('text'):
+                return message['text']
+    return None
+
+def dataset_record(job, directory=None, include_source=False):
+    """One training/evaluation record for a delegation: what was asked, what the worker was shown and produced, and what the frontier decided and finally shipped.
+
+    Structure only by default (hashes, counts, paths, ranges, reason codes). `include_source` adds the task text, the exact prompt, the local patch, the final frontier diff and the
+    review notes: private source and model output, written only on request so a later fine-tuning set stays possible without leaking by default."""
+    directory = Path(directory or STATE / 'jobs' / job['id'])
+    request, result, review = job['request'], job.get('result') or {}, job.get('review') or {}
+    base = row(job, directory)
+    context = read_json(directory / 'work.context.json') or {}
+    turns = read_json(directory / 'work.turns.json') or {}
+    gate = read_json(directory / 'work.gate.json') or {}
+    shipped = read_json(directory / 'final-frontier.json')
+    record = {'schema': SCHEMA, **base, 'created': job.get('created'), 'ended': job.get('ended'),
+              'spec_sha256': hashlib.sha256(json.dumps(request.get('spec') or request.get('task', ''), sort_keys=True).encode()).hexdigest(),
+              'allowed_paths': request.get('allowed_paths', []), 'read_paths': request.get('read_paths', []), 'handoff_id': request.get('handoff_id'),
+              'context': {'budget_chars': context.get('budget_chars'), 'used_chars': context.get('used_chars'),
+                          'files': {p: {k: v for k, v in info.items() if k in ('lines', 'shown', 'whole', 'ranges')} for p, info in (context.get('files') or {}).items()},
+                          'focus': context.get('focus'), 'coverage': context.get('coverage')},
+              'gate': {k: gate.get(k) for k in ('tripped', 'mode', 'counts')} if gate else None,
+              'turns': [{k: t.get(k) for k in ('step', 'done_reason', 'output_tokens', 'truncated', 'continuation', 'blocks')} | {'errors': len(t.get('errors', []))} for t in turns.get('turns', [])],
+              'local': {'status': result.get('worker_status'), 'changed_files': result.get('changed_files', []), 'checks': [{'name': c.get('name'), 'status': c.get('status'), 'failures': len(c.get('failures') or [])} for c in result.get('checks', [])],
+                        'spec_verification': {k: v for k, v in (result.get('spec_verification') or {}).items() if k != 'results'} or None},
+              'frontier': {'decision': review.get('decision'), 'reason': review.get('reason'), 'effort_seconds': review.get('review_effort_seconds'), 'task_outcome': review.get('task_outcome'),
+                           'notes_chars': len(review.get('notes', '')), 'final_diff': shipped}}
+    if include_source:
+        record['source'] = {'task': request.get('task'), 'prompt': prompt_of(directory), 'local_patch': read_text(directory / 'job.diff') or read_text(directory / 'patch.diff'),
+                            'final_frontier_diff': read_text(directory / 'final-frontier.diff'), 'review_notes': review.get('notes')}
+    return record
+
+def dataset(jobs, since_days=None, kinds=None, include_source=False, include_unreviewed=False, include_eval=False, jobs_dir=None, now=None):
+    """Records for real delegations (benchmark jobs excluded) that the frontier reviewed, newest first."""
+    cutoff = (now or time.time()) - since_days * 86400 if since_days else None
+    out = []
+    for job in jobs:
+        if (not include_eval and not is_real(job)) or (not include_unreviewed and not job.get('review')):
+            continue
+        if kinds and (job['request'].get('kind') or '-') not in kinds:
+            continue
+        if cutoff and (job.get('created') or 0) < cutoff:
+            continue
+        out.append(dataset_record(job, Path(jobs_dir or STATE / 'jobs') / job['id'], include_source))
+    return sorted(out, key=lambda r: -(r.get('created') or 0))

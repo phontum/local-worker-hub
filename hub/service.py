@@ -308,6 +308,12 @@ def create_app(store=None, start_workers=True):
         return router.estimate(role,body.get('kind') or None,str(body.get('task') or ''),int(body.get('files') or 0),store.list(100000),bool(body.get('tier0_answerable')),
                                bool(body.get('gate_tripped')),bool(body.get('ambiguous_cause')))
 
+    @app.get('/api/dataset',dependencies=[Depends(auth)])
+    def dataset(since_days:int|None=Query(default=None,ge=1,le=3650),kinds:str='',include_source:bool=False,include_unreviewed:bool=False,include_eval:bool=False):
+        """Delegation records for later router evaluation, retrieval work or fine-tuning. Structure only unless include_source (private source and model output)."""
+        wanted=[k for k in kinds.split(',') if k] or None
+        return {'schema':outcomes.SCHEMA,'records':outcomes.dataset(store.list(100000),since_days,wanted,include_source,include_unreviewed,include_eval)}
+
     @app.get('/api/outcomes',dependencies=[Depends(auth)])
     def outcome_stats(include_eval:bool=False):
         from .skills.coding.delegation import router

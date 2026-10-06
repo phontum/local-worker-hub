@@ -1,3 +1,4 @@
+import json
 import subprocess
 from pathlib import Path
 
@@ -78,3 +79,63 @@ def test_a_takeover_review_records_the_final_diff_and_stats_are_served(store, or
         assert events and events[-1]['data']['files'][0]['path'] == 'a.py'
         table = c.get('/api/outcomes', headers=headers).json()['by_kind']
         assert table[0]['takeover'] == 1 and table[0]['reasons'] == {'wrong_localization': 1}
+
+# Dataset export -----------------------------------------------------------------------------------------------------------
+
+def make_reviewed_job(store, origin, tmp_path, caller='mcp', decision='takeover'):
+    from hub.skills.coding.delegation import outcomes as out
+    request = JobRequest(role='editor', task='Edit a with PRIVATE text', repo=str(origin), allowed_paths=['a.py'], kind='mechanical', idempotency_key='ds-' + caller + decision, caller=caller)
+    submitted = store.submit(request)
+    store.next()
+    store.finish(submitted['id'], 'completed', {'worker_status': 'PARTIAL', 'changed_files': ['a.py'], 'checks': [{'name': 'unit', 'status': 'failed', 'failures': [{'x': 1}]}],
+                                                 'usage': {'input': 100, 'output': 20}, 'acceptance': {'diff': {'files': 1, 'added': 2, 'removed': 1}, 'scope_ok': True}})
+    directory = tmp_path / 'jobs' / submitted['id']
+    directory.mkdir(parents=True)
+    (directory / 'work.context.json').write_text(json.dumps({'budget_chars': 9000, 'used_chars': 400, 'files': {'a.py': {'lines': 2, 'shown': 2, 'whole': True, 'ranges': [[1, 2]], 'secret': 'dropped'}}}))
+    (directory / 'work.turns.json').write_text(json.dumps({'turns': [{'step': 0, 'done_reason': 'stop', 'output_tokens': 40, 'truncated': False, 'errors': ['x'], 'blocks': 1}]}))
+    (directory / 'job.diff').write_text('--- a/a.py\n+++ b/a.py\n-x = 1\n+x = 2\n')
+    (directory / 'work.session.json').write_text(json.dumps({'messages': [{'type': 'user', 'text': 'Task:\nEdit a with PRIVATE text'}]}))
+    store.review(submitted['id'], Review(decision=decision, notes='Rewrote it myself', reason='wrong_edit') if decision != 'accepted' else Review(decision='accepted'))
+    return store.get(submitted['id']), directory
+
+def test_the_dataset_record_is_structure_only_by_default_and_complete_with_source(store, origin, tmp_path):
+    import json as _json
+    from hub.skills.coding.delegation import outcomes as out
+    job, directory = make_reviewed_job(store, origin, tmp_path)
+    (directory / 'final-frontier.json').write_text(_json.dumps({'available': True, 'changed_files': 1}))
+    (directory / 'final-frontier.diff').write_text('+x = 9\n')
+    plain = out.dataset_record(job, directory)
+    assert plain['schema'] == 1 and plain['kind'] == 'mechanical' and plain['local']['status'] == 'PARTIAL' and plain['local']['checks'] == [{'name': 'unit', 'status': 'failed', 'failures': 1}]
+    assert plain['context']['files'] == {'a.py': {'lines': 2, 'shown': 2, 'whole': True, 'ranges': [[1, 2]]}} and plain['turns'][0]['errors'] == 1
+    assert plain['frontier'] == {'decision': 'takeover', 'reason': 'wrong_edit', 'effort_seconds': None, 'task_outcome': None, 'notes_chars': 17, 'final_diff': {'available': True, 'changed_files': 1}}
+    assert plain['local_tokens'] == 120 and len(plain['spec_sha256']) == 64
+    assert 'source' not in plain and 'PRIVATE' not in _json.dumps(plain)
+    full = out.dataset_record(job, directory, include_source=True)
+    assert full['source']['task'].endswith('PRIVATE text') and full['source']['prompt'].startswith('Task:') and '+x = 2' in full['source']['local_patch']
+    assert full['source']['final_frontier_diff'] == '+x = 9\n' and full['source']['review_notes'] == 'Rewrote it myself'
+
+def test_the_dataset_filters_benchmarks_unreviewed_kinds_and_age(store, origin, tmp_path):
+    from hub.skills.coding.delegation import outcomes as out
+    kept, _ = make_reviewed_job(store, origin, tmp_path, 'mcp', 'takeover')
+    make_reviewed_job(store, origin, tmp_path, 'eval', 'accepted')
+    jobs = store.list()
+    assert [r['job'] for r in out.dataset(jobs, jobs_dir=tmp_path / 'jobs')] == [kept['id']]
+    assert len(out.dataset(jobs, include_eval=True, jobs_dir=tmp_path / 'jobs')) == 2
+    assert out.dataset(jobs, kinds=['fix_test'], jobs_dir=tmp_path / 'jobs') == []
+    assert out.dataset(jobs, since_days=1, now=kept['created'] + 5 * 86400, jobs_dir=tmp_path / 'jobs') == []
+
+def test_the_dataset_endpoint_and_cli_write_jsonl(store, origin, tmp_path, monkeypatch):
+    import sys
+    from hub import cli, client
+    make_reviewed_job(store, origin, tmp_path)
+    headers = {'Authorization': 'Bearer ' + initialize()}
+    with TestClient(create_app(store, start_workers=False), base_url='http://127.0.0.1:8765') as c:
+        body = c.get('/api/dataset', headers=headers).json()
+        assert body['schema'] == 1 and len(body['records']) == 1 and 'source' not in body['records'][0]
+        assert c.get('/api/dataset?include_source=true&kinds=fix_test', headers=headers).json()['records'] == []
+        monkeypatch.setattr(client, 'call', lambda method, path, data=None: c.request(method, path, headers=headers).json())
+        target = tmp_path / 'out.jsonl'
+        monkeypatch.setattr(sys, 'argv', ['local-worker', 'dataset', 'export', '--out', str(target)])
+        cli.main()
+        lines = target.read_text().splitlines()
+        assert len(lines) == 1 and json.loads(lines[0])['frontier']['reason'] == 'wrong_edit' and oct(target.stat().st_mode)[-3:] == '600'

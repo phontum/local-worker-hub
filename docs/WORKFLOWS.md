@@ -573,6 +573,8 @@ Deterministic replays of each documented failure live in `tests/test_edit_incide
   (`hub/skills/coding/execution/execctx.py`) and those ranges are shown to the editor ahead of everything else, with a short failure-evidence block. No frames, no change.
 - **Outcomes.** `record_review` now needs a reason code on a rejection or takeover (`wrong_localization` and `context_missing` were added). `record_outcome JOB` (or `local-worker outcome JOB`;
   it also runs automatically on a rejection or takeover) stores `final-frontier.diff`: the authorized files as the worker's snapshot saw them against your tree now.
+  `local-worker dataset export --out FILE.jsonl` writes one JSONL record per reviewed real delegation (schema 1: task shape, spec hash, the context ranges the editor was shown, turns, local patch stats and checks,
+  the frontier's decision and reason, the final frontier diff summary); structure only by default, `--include-source` adds the task text, exact prompt, local patch, final frontier diff and review notes (private; nothing is trained on it).
   `local-worker stats` prints acceptance by role and kind; benchmark (`eval`, `benchmark`) jobs are excluded by their `caller`. `hub/skills/coding/delegation/outcomes.py:row` derives a feature row per job; nothing is duplicated.
 - **Apply is transactional.** Targets are validated first, the current bytes are backed up and journalled, files are replaced one by one and any failure restores them
   (`apply.journal`; a journal left by a crash is rolled back when the service starts). `apply_result` refuses while a file the job only read changed (`read_paths` directories and

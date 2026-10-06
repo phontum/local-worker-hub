@@ -131,6 +131,17 @@ def main():
         args=p.parse_args()
         from .mcp_adapter import job_path
         print(json.dumps(call('POST',job_path(args.job_id)+'/outcome'),indent=2));return
+    if command=='dataset':
+        p=argparse.ArgumentParser(description='Export delegation records as JSONL (private, local). Structure only by default: hashes, counts, paths, ranges, reason codes.')
+        p.add_argument('command');p.add_argument('action',choices=['export']);p.add_argument('--out',required=True);p.add_argument('--since-days',type=int);p.add_argument('--kinds',default='',help='comma-separated job kinds')
+        p.add_argument('--include-source',action='store_true',help='ALSO write task text, the exact prompt, the local patch, the final frontier diff and review notes (private source and model output)')
+        p.add_argument('--include-unreviewed',action='store_true');p.add_argument('--include-eval',action='store_true',help='include benchmark jobs')
+        args=p.parse_args()
+        query={'kinds':args.kinds,'include_source':str(args.include_source).lower(),'include_unreviewed':str(args.include_unreviewed).lower(),'include_eval':str(args.include_eval).lower()}
+        if args.since_days:query['since_days']=args.since_days
+        records=call('GET','/api/dataset?'+urlencode(query))['records']
+        out=Path(args.out);out.write_text(''.join(json.dumps(r)+'\n' for r in records));out.chmod(0o600)
+        print(f"Wrote {len(records)} record(s) to {out}"+(' (contains private source)' if args.include_source else ' (structure only)'));return
     if command=='stats':
         p=argparse.ArgumentParser(description='Frontier acceptance by role and kind over reviewed delegations (benchmark jobs excluded).');p.add_argument('command');p.add_argument('--include-eval',action='store_true')
         args=p.parse_args()
