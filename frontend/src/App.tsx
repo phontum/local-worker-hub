@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, Event, Job, Sample, Summary } from './api';
 import { StatusBar, View } from './StatusBar';
+import { Learning } from './Learning';
 import { Chat } from './Chat';
 import { JobList } from './JobList';
 import { JobDetail } from './JobDetail';
@@ -13,7 +14,7 @@ export default function App() {
   const [events, setEvents] = useState<Event[]>([]), [paired, setPaired] = useState(true);
   const [detail, setDetail] = useState<Job | null>(null), [stats, setStats] = useState(false);
   const [statsPeriod, setStatsPeriod] = useState<'since_reset' | 'today' | 'all'>('since_reset');
-  const [view, setViewState] = useState<View>(() => location.hash === '#chat' ? 'chat' : 'tasks');
+  const [view, setViewState] = useState<View>(() => location.hash === '#chat' ? 'chat' : location.hash === '#learning' ? 'learning' : 'tasks');
   const [code, setCode] = useState(''), [error, setError] = useState(''), [filter, setFilter] = useState('all'), [busy, setBusy] = useState(false);
   usePoll(async signal => {
     try {
@@ -34,7 +35,7 @@ export default function App() {
       setDetail(j); setEvents(e => [...e, ...page.events].slice(-2000)); cursor.current = page.next_cursor;
     } catch (e) { if (!signal.aborted) setError((e as Error).message); }
   }, 2000, [selected], !!selected);
-  const setView = (next: View) => { setViewState(next); window.history.replaceState(null, '', next === 'chat' ? '#chat' : location.pathname + location.search); };
+  const setView = (next: View) => { setViewState(next); window.history.replaceState(null, '', next !== 'tasks' ? '#' + next : location.pathname + location.search); };
   const openJob = (id: string) => { setSelected(id); setView('tasks'); };
   async function pair(e: React.FormEvent) {
     e.preventDefault(); setBusy(true);
@@ -56,7 +57,7 @@ export default function App() {
     {error && <div className="error banner" role="alert">{error}</div>}
     {!paired ? <section className="pair card"><h2>Connect this browser</h2><p>Run <code>local-worker dashboard</code> in your terminal, then enter the one-time code.</p>
       <form onSubmit={pair}><label htmlFor="pair-code">Pairing code</label><input id="pair-code" value={code} onChange={e => setCode(e.target.value)} autoComplete="off" required /><button disabled={busy}>Connect</button></form></section> :
-      view === 'chat' ? <main className="work chat-view"><Chat onOpenJob={openJob} /></main> :
+      view === 'learning' ? <Learning /> : view === 'chat' ? <main className="work chat-view"><Chat onOpenJob={openJob} /></main> :
       <main className="work"><JobList jobs={jobs} selected={selected} filter={filter} onFilter={setFilter} onSelect={setSelected} />
         <JobDetail job={job} events={events} busy={busy} onCancel={cancel} /></main>}
     {stats && <StatsDrawer summary={summary} period={statsPeriod} onPeriod={p => { setSummary(null); setStatsPeriod(p); }} sample={sample} history={history} onClose={() => setStats(false)} />}

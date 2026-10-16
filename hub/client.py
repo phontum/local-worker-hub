@@ -5,7 +5,10 @@ import sys
 import httpx
 from .settings import URL, CONFIG, initialize
 
-def connect(start=False):
+def connect(start=False, allow_enabling=False):
+    from .integration import state, require_enabled
+    if not (allow_enabling and state()['phase']=='enabling'):
+        require_enabled()
     try:token=initialize() if start else (CONFIG/'api-token').read_text().strip()
     except OSError:raise RuntimeError('Local Worker Hub is not initialized. Run local-worker start.')
     client=httpx.Client(base_url=URL,headers={'Authorization':'Bearer '+token},timeout=httpx.Timeout(35,connect=2),trust_env=False)

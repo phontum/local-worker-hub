@@ -15,9 +15,10 @@ from fastapi import FastAPI, HTTPException, Request, Response, Depends, Query
 from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from .models import JobRequest, Review
+from .models import JobRequest, Review, Check
 from .settings import initialize, STATE, PROJECT
-from .model_registry import model_name, allowed_names, models as registered_models, probe, OLLAMA
+from .llama_backend import BASE_URL, request_body, normalized, stream as llama_stream
+from .model_registry import model_name, allowed_names, models as registered_models, probe
 from .skills.coding.editing import workspace
 from .skills.coding.delegation import outcomes
 from .scoped import ScopeError
@@ -41,7 +42,7 @@ class AnalysisRequest(BaseModel):
 
 
 def artifact_path(ident, name):
-    allowed={'ask.json','report.txt','draft-report.txt','answer-review.json','work.investigation.json','investigate.investigation.json','work.web-verification.json','answer-review.web-verification.json','work.research-plan.json','answer-review.research-plan.json','scoped-diff.txt','patch.diff','job.diff','staged.diff','before-status.txt','after-status.txt','before-diff.txt','after-diff.txt','before-staged.txt','after-staged.txt'}
+    allowed={'experiments.json','ask.json','report.txt','draft-report.txt','answer-review.json','work.investigation.json','investigate.investigation.json','work.web-verification.json','answer-review.web-verification.json','work.research-plan.json','answer-review.research-plan.json','scoped-diff.txt','patch.diff','job.diff','staged.diff','before-status.txt','after-status.txt','before-diff.txt','after-diff.txt','before-staged.txt','after-staged.txt'}
     if name not in allowed and not re.fullmatch(r'check-(?:\d+-)?\d+\.log',name) and not re.fullmatch(r'board-[a-z0-9.-]+\.(?:json|txt)',name):
         raise HTTPException(403,'Only reports, diffs and check outputs are exposed')
     path=STATE/'jobs'/ident/name
@@ -52,29 +53,11 @@ def artifact_path(ident, name):
 LOW_MEMORY_MB = int(os.environ.get('LOCAL_WORKER_MIN_AVAILABLE_MB', '2500'))
 
 async def relieve_memory(threshold_mb=None):
-    """Unload resident models when host RAM is low.
-
-    llama.cpp keeps its prompt cache in host RAM, growing with every distinct prompt prefix (about 0.5 GB per long
-    Gemma prompt, 8 GB default limit) and the Linux OOM killer ends Ollama mid-request on a small WSL host.
-    Unloading frees it; the next request reloads (about 10s). LLAMA_ARG_CACHE_RAM on the Ollama service bounds it at the source.
-    """
-    threshold = (threshold_mb or LOW_MEMORY_MB)
+    """Refuse new inference under memory pressure; never manipulate another service."""
+    threshold = threshold_mb or LOW_MEMORY_MB
     available = psutil.virtual_memory().available // 2**20
-    if available >= threshold:
-        return None
-    unloaded = []
-    async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=5), trust_env=False) as client:
-        try:
-            unloaded = [m['name'] for m in (await client.get(OLLAMA + '/api/ps')).json().get('models', [])]
-            for name in unloaded:
-                await client.post(OLLAMA + '/api/generate', json={'model': name, 'keep_alive': 0})
-            for _ in range(30):
-                if not (await client.get(OLLAMA + '/api/ps')).json().get('models'):
-                    break
-                await asyncio.sleep(.5)
-        except (httpx.HTTPError, ValueError):
-            return {'available_mb': available, 'threshold_mb': threshold, 'unloaded': [], 'error': 'Ollama unavailable'}
-    return {'available_mb': available, 'threshold_mb': threshold, 'unloaded': unloaded}
+    if available >= threshold: return None
+    return {'available_mb': available, 'threshold_mb': threshold, 'action': 'refuse_inference'}
 
 ALLOWED_HOSTS = {'127.0.0.1:8765','localhost:8765'}
 ORIGINS = {'http://127.0.0.1:8765','http://localhost:8765'}
@@ -82,6 +65,8 @@ ORIGINS = {'http://127.0.0.1:8765','http://localhost:8765'}
 def create_app(store=None, start_workers=True):
     token=initialize();store=store or Store();runner=Runner(store,token)
     pair_codes={};browser_sessions={}
+    from .taskstore import Tasks, TaskDecision, ComparisonReview
+    observations=Tasks(store)
 
     async def sample_hardware():
         while True:
@@ -121,6 +106,14 @@ def create_app(store=None, start_workers=True):
 
     @app.middleware('http')
     async def boundary(request:Request,call_next):
+        from .integration import enabled
+        if not enabled() and request.url.path != '/api/health' and not request.url.path.startswith('/inference/'):
+            return Response('Local Worker is switched off',503)
+        match=re.match(r'^/api/jobs/([a-f0-9]{32})(?:/|$)',request.url.path)
+        if match:
+            record=store.get(match[1])
+            if record and record['request'].get('purpose')=='shadow':
+                return Response('Shadow results are available only through finalized task comparisons',403)
         if request.headers.get('host') not in ALLOWED_HOSTS:return Response('Invalid host',400)
         if request.headers.get('origin') and request.headers['origin'] not in ORIGINS:
             return Response('Cross-origin access denied',403)
@@ -166,6 +159,7 @@ def create_app(store=None, start_workers=True):
 
     @app.post('/api/jobs',dependencies=[Depends(auth)])
     def submit(request:JobRequest):
+        if request.purpose=='shadow':raise HTTPException(403,'Shadows are created only by the task capture pipeline')
         if request.in_place and request.caller=='mcp':
             raise HTTPException(403,'in_place is not available to MCP callers: Editor jobs run in a private workspace and change your tree only through apply_result. Humans can use local-worker --in-place.')
         if request.board or request.board_mode:
@@ -178,9 +172,91 @@ def create_app(store=None, start_workers=True):
                 evidence=store.get(ident)
                 if not evidence or evidence['state'] in ('queued','running') or not evidence.get('result') or evidence['request'].get('repo')!=request.repo:
                     raise ValueError('Evidence must be a finished job from the same canonical repository')
-            return store.submit(expand_profile(request))
+            value=store.submit(expand_profile(request))
+            return value
         except ValueError as e:raise HTTPException(409,str(e))
         except OverflowError as e:raise HTTPException(429,str(e))
+
+    @app.post('/api/tasks/decision',dependencies=[Depends(auth)])
+    def task_decision(request:TaskDecision):
+        try:return observations.record(request)
+        except (ValueError,OSError,ScopeError) as exc:raise HTTPException(409,str(exc))
+
+    @app.get('/api/recipes',dependencies=[Depends(auth)])
+    def recipe_list(repo:str):
+        from .skills.coding.editing.recipes import list_recipes
+        return list_recipes(repo)
+
+    @app.post('/api/recipes/review',dependencies=[Depends(auth)])
+    def recipe_review(body:dict):
+        from .skills.coding.editing.recipes import review
+        try:return review(body['repo'],body['id'],body['decision'],body['notes'])
+        except (KeyError,ValueError,OSError) as exc:raise HTTPException(409,str(exc))
+
+    @app.post('/api/recipes/run',dependencies=[Depends(auth)])
+    def recipe_run(body:dict):
+        from .skills.coding.editing.recipes import resolve
+        try:
+            recipe,ops=resolve(body['repo'],body['id'],body.get('parameters',{}))
+            checks=[Check.model_validate(c) for c in body.get('checks',[])]
+            if not set(recipe.check_names).issubset({c.name for c in checks}):raise ValueError('Recipe required checks missing')
+            request=JobRequest(role='editor',repo=body['repo'],task='Run reviewed recipe '+recipe.name,
+                allowed_paths=body['allowed_paths'],read_paths=body.get('read_paths',[]),checks=checks,
+                execution_mode='hybrid',deterministic_operations=ops,deterministic_only=True,
+                recipe_id=body['id'],recipe_parameters=body.get('parameters',{}),
+                idempotency_key=body['idempotency_key'],caller='mcp')
+            if recipe.invariants:
+                from .skills.coding.delegation.spec import Criterion
+                request=request.model_copy(update={'spec':{'goal':request.task,'scope':{'read':request.read_paths,'edit':request.allowed_paths},'invariants':[Criterion.model_validate(c).model_dump() for c in recipe.invariants]}})
+            return store.submit(request)
+        except (KeyError,ValueError,OSError) as exc:raise HTTPException(409,str(exc))
+
+    @app.post('/api/recipes/mine',dependencies=[Depends(auth)])
+    def recipe_mine(body:dict):
+        from .skills.coding.editing.recipes import mine
+        examples=[]
+        for task in observations.list():
+            if task['input']['repo']!=body['repo'] or task['state']!='completed':continue
+            accepted=any('equivalent_solution' in r.get('labels',[]) for r in task['reviews'])
+            directory=observations.directory(task['id'])/'snapshots'
+            if accepted and directory.exists():
+                from .skills.coding.editing.candidates import contents
+                examples.append({'id':task['id'],'accepted':True,'before':contents(directory/'baseline'),
+                                 'after':contents(directory/'frontier'),'checks':[c['name'] for c in task['input']['spec']['checks']]})
+        from .experimental_runtime import mine_accepted
+        return mine_accepted(body['repo'],store.list(200),examples)
+
+    @app.post('/api/change-links',dependencies=[Depends(auth)])
+    def change_links(body:dict):
+        from .skills.coding.intelligence import changegraph
+        from .skills.coding.editing.candidates import contents
+        rows=changegraph.git_rows(body['repo']) if body.get('include_git',True) else []
+        for task in observations.list():
+            if task['input']['repo']!=body['repo'] or task['state']!='completed' or not any('equivalent_solution' in r.get('labels',[]) for r in task['reviews']) or task['id']==body.get('exclude_task'):continue
+            directory=observations.directory(task['id'])/'snapshots'
+            if directory.exists():rows.append({'id':task['id'],'source':'reviewed','nodes':list(changegraph.nodes(contents(directory/'baseline'),contents(directory/'frontier')))})
+        from .experimental_runtime import accepted_change_rows
+        rows+=accepted_change_rows(body['repo'],store.list(1000))
+        graph=changegraph.save(body['repo'],changegraph.build(rows))
+        return {'observations':graph['observations'],'links':changegraph.explain(graph,body.get('changed',[]))}
+
+    @app.get('/api/tasks',dependencies=[Depends(auth)])
+    def task_list():return [observations.brief(t) for t in observations.list()]
+
+    @app.post('/api/tasks/{ident}/finish',dependencies=[Depends(auth)])
+    def task_finish(ident:str,body:dict):
+        try:return observations.finish(ident,body.get('outcome','completed'),body.get('answer'))
+        except (ValueError,OSError,TimeoutError) as exc:raise HTTPException(409,str(exc))
+
+    @app.get('/api/tasks/{ident}/comparison',dependencies=[Depends(auth)])
+    def task_comparison(ident:str,include_source:bool=False):
+        try:return observations.comparison(ident,include_source)
+        except ValueError as exc:raise HTTPException(409,str(exc))
+
+    @app.post('/api/tasks/{ident}/review',dependencies=[Depends(auth)])
+    def task_review(ident:str,request:ComparisonReview):
+        try:return observations.review(ident,request)
+        except ValueError as exc:raise HTTPException(409,str(exc))
 
     @app.get('/api/jobs/{ident}',dependencies=[Depends(auth)])
     def job(ident:str,view:Literal['full','compact']='full'):
@@ -255,6 +331,37 @@ def create_app(store=None, start_workers=True):
         except ValueError as exc:raise HTTPException(409,str(exc))
         except OverflowError as exc:raise HTTPException(429,str(exc))
 
+    @app.post('/api/jobs/{ident}/select-candidate',dependencies=[Depends(auth)])
+    def select_candidate(ident:str,body:dict):
+        from .skills.coding.editing import candidates,recipes
+        source=job(ident)
+        if source['state']!='completed' or len(str(body.get('notes','')).strip())<10:
+            raise HTTPException(409,'Selection requires a completed job and explicit acceptance-criteria review notes')
+        try:
+            evidence=(source.get('result') or {}).get('experiments',{}).get('minimization',{})
+            record=workspace.read_record(ident)
+            if record['state']!='ready':raise ValueError('Candidate workspace is no longer ready')
+            current=candidates.contents(record['path'])
+            alternative=candidates.contents(STATE/'jobs'/ident/'minimized-candidate')
+            if not alternative or candidates.digest(alternative)!=evidence.get('alternative_hash') or candidates.digest(current)!=evidence.get('original_hash'):
+                raise ValueError('Candidate or original workspace changed since minimization')
+            operations=[]
+            for path in sorted(set(current)|set(alternative)):
+                if current.get(path)==alternative.get(path):continue
+                if path not in record['allowed'] or path not in current or path not in alternative:
+                    raise ValueError('Candidate exceeds edit scope or changes file existence')
+                operations.append(recipes.Operation(kind='literal',path=path,old=current[path],new=alternative[path]))
+            if not operations:raise ValueError('Candidate contains no reduction')
+            original=JobRequest.model_validate(source['request'])
+            selected=JobRequest(role='editor',repo=record['origin'],task='Select reviewed minimized candidate: '+str(body['notes']),
+                allowed_paths=[op.path for op in operations],read_paths=original.read_paths,checks=original.checks,
+                execution_mode='hybrid',deterministic_operations=operations,deterministic_only=True,
+                workspace_from=ident,idempotency_key=body['idempotency_key'],caller='mcp')
+            result=store.submit(selected)
+            store.event(ident,'candidate-selection',{'candidate_job':result['id'],'notes':str(body['notes'])[:4000]})
+            return {'id':result['id'],'state':result['state'],'note':'All approved checks rerun in the private continuation; apply_result remains required'}
+        except (KeyError,ValueError,OSError,workspace.WorkspaceError) as exc:raise HTTPException(409,str(exc))
+
     @app.post('/api/jobs/{ident}/cancel',dependencies=[Depends(auth)])
     def cancel(ident:str):job(ident);return store.cancel(ident)
 
@@ -263,9 +370,14 @@ def create_app(store=None, start_workers=True):
         job(ident)
         try:value=store.review(ident,request)
         except ValueError as e:raise HTTPException(409,str(e))
-        if request.decision!='accepted':
-            shipped=outcomes.final_diff(value)  # what the frontier finally left in the tree, for retrieval and router evaluation
-            store.event(ident,'final-frontier-diff',shipped)
+        shipped=outcomes.final_diff(value)
+        store.event(ident,'final-frontier-diff',shipped)
+        if request.decision=='accepted' and value['request'].get('experiments',{}).get('recipes'):
+            try:
+                from .experimental_runtime import mine_accepted
+                proposals=mine_accepted(value['request']['repo'],store.list(200))
+                store.event(ident,'recipe-proposals',{'ids':[p['id'] for p in proposals]})
+            except (ValueError,OSError) as exc:store.event(ident,'recipe-mining-error',{'message':str(exc)[:500]})
         return value
 
     @app.post('/api/jobs/{ident}/outcome',dependencies=[Depends(auth)])
@@ -292,12 +404,15 @@ def create_app(store=None, start_workers=True):
         if not changed:raise HTTPException(409,'paths is required')
         try:index=provider_for(repo,lsp_servers(repo)).index
         except (ValueError,OSError) as e:raise HTTPException(409,str(e))
-        found=[]
+        found=[];graph=None
         try:
             profile,_=load_profile(repo)
+            if profile.experiments.enabled and profile.experiments.graph:
+                from .skills.coding.intelligence.changegraph import load
+                graph=load(repo)
             found=[c.model_dump() for group in profile.groups.values() for c in group if templates.PLACEHOLDER in c.argv]
         except (ValueError,OSError):pass
-        return templates.recommend(index,changed,found,testmap.history_from_jobs(store.list(100000)),int(body.get('limit') or 8))
+        return templates.recommend(index,changed,found,testmap.history_from_jobs(store.list(100000)),int(body.get('limit') or 8),graph)
 
     @app.post('/api/route',dependencies=[Depends(auth)])
     def route(body:dict):
@@ -305,8 +420,21 @@ def create_app(store=None, start_workers=True):
         from .skills.coding.delegation import router
         role=str(body.get('role') or 'editor')
         if role not in ('investigator','editor','validator'):raise HTTPException(409,'role must be investigator, editor or validator')
-        return router.estimate(role,body.get('kind') or None,str(body.get('task') or ''),int(body.get('files') or 0),outcomes.counted(store.list(100000)),bool(body.get('tier0_answerable')),
+        advice=router.estimate(role,body.get('kind') or None,str(body.get('task') or ''),int(body.get('files') or 0),outcomes.counted(store.list(100000)),bool(body.get('tier0_answerable')),
                                bool(body.get('gate_tripped')),bool(body.get('ambiguous_cause')))
+        from collections import Counter
+        labels=Counter();reviewed_shadows=0;censored=0
+        for observation in observations.list():
+            spec=observation['input'].get('spec') or {}
+            if spec.get('kind')!=body.get('kind') or not observation.get('shadow_job'):continue
+            shadow=store.get(observation['shadow_job'])
+            if not shadow or shadow['state'] in ('cancelled','timed_out','interrupted'):
+                censored+=1;continue
+            if observation['state']!='completed' or not observation.get('reviews'):continue
+            reviewed_shadows+=1;labels.update(observation['reviews'][-1].get('labels',[]))
+        advice['shadow_supervision']={'reviewed':reviewed_shadows,'censored':censored,'labels':dict(labels),'note':'reviewed labels are advisory; structural overlap is not correctness'}
+        advice['patch_supervision']=dict(Counter(label for item in store.list(10000) if item['request'].get('role')==role and item['request'].get('kind')==body.get('kind') for label in (item.get('review') or {}).get('patch_labels',[])))
+        return advice
 
     @app.get('/api/dataset',dependencies=[Depends(auth)])
     def dataset(since_days:int|None=Query(default=None,ge=1,le=3650),kinds:str='',include_source:bool=False,include_unreviewed:bool=False,include_eval:bool=False,include_history:bool=False):
@@ -376,7 +504,7 @@ def create_app(store=None, start_workers=True):
 
     @app.get('/api/chat-options',dependencies=[Depends(auth)])
     def chat_options():
-        """Registered model aliases for the dashboard chat; `installed` is null when Ollama cannot be asked."""
+        """Registered model aliases for the dashboard chat; `installed` is null when llama.cpp cannot be asked."""
         return {'models':[{'alias':alias,'name':value['name'],'installed':probe(value['name'],2).get('installed')} for alias,value in registered_models().items()]}
 
     @app.get('/api/summary',dependencies=[Depends(auth)])
@@ -422,7 +550,7 @@ def create_app(store=None, start_workers=True):
         started=time.monotonic()
         client=httpx.AsyncClient(timeout=httpx.Timeout(900,connect=5),trust_env=False)
         if body.get('stream'):body['stream_options']={'include_usage':True}
-        sending=asyncio.create_task(client.send(client.build_request('POST','http://127.0.0.1:11434/v1/chat/completions',json=body),stream=True))
+        sending=asyncio.create_task(client.send(client.build_request('POST',BASE_URL+'/v1/chat/completions',json=body),stream=True))
         try:
             while not sending.done():
                 if store.get(ident)['state']!='running' or await request.is_disconnected():
@@ -434,7 +562,7 @@ def create_app(store=None, start_workers=True):
             sending.cancel();await asyncio.gather(sending,return_exceptions=True);await client.aclose();raise
         if upstream.status_code!=200:
             msg=(await upstream.aread())[:1000];await upstream.aclose();await client.aclose()
-            raise HTTPException(502,'Ollama error: '+msg.decode(errors='replace'))
+            raise HTTPException(502,'llama.cpp error: '+msg.decode(errors='replace'))
         def usage(value,first=None):
             u=value.get('usage')
             if not u:return
@@ -446,7 +574,7 @@ def create_app(store=None, start_workers=True):
                 'reasoning_breakdown_available':'reasoning_tokens' in u.get('completion_tokens_details',{}),
                 'context_tokens':prompt,'context_limit':16384,'seconds':duration,
                 'tokens_per_second':output/(time.monotonic()-first) if first and time.monotonic()>first else output/duration if duration else None,
-                'measurement':'Ollama usage; end-to-end request throughput (includes prefill/load for nonstreaming)','phase':'provider_request'})
+                'measurement':'llama.cpp usage; end-to-end request throughput (includes prefill/load for nonstreaming)','phase':'provider_request'})
         async def stream():
             first=None
             try:
@@ -476,28 +604,41 @@ def create_app(store=None, start_workers=True):
         if options.get('num_ctx') not in (16384,32768) or not 1<=options.get('num_predict',0)<=cap:
             raise HTTPException(400,'Unsupported context or output budget')
         relieved=await relieve_memory()
-        if relieved:store.event(ident,'memory-guard',relieved)
+        if relieved:
+            store.event(ident,'memory-guard',relieved)
+            raise HTTPException(503,'Insufficient available RAM for inference')
         started=time.monotonic()
         def record_usage(value):
             prompt=value.get('prompt_eval_count',0) or 0;output=value.get('eval_count',0) or 0
-            store.event(ident,'inference',{'model':body['model'],'input':prompt,'output':output,'cache_read':0,'cache_write':0,
-                'cache_breakdown_available':False,'reasoning':0,'reasoning_breakdown_available':False,'context_tokens':prompt,
+            u=value.get('provider_usage') or {};cached=(u.get('prompt_tokens_details') or {}).get('cached_tokens',0) or 0
+            reasoning=(u.get('completion_tokens_details') or {})
+            store.event(ident,'inference',{'model':body['model'],'input':max(0,prompt-cached),'output':output,'cache_read':cached,'cache_write':0,
+                'cache_breakdown_available':'cached_tokens' in (u.get('prompt_tokens_details') or {}),'reasoning':reasoning.get('reasoning_tokens',0),'reasoning_breakdown_available':'reasoning_tokens' in reasoning,'context_tokens':prompt,
                 'context_limit':options['num_ctx'],'seconds':time.monotonic()-started,
                 'prompt_eval_seconds':(value.get('prompt_eval_duration') or 0)/1e9,
                 'eval_seconds':(value.get('eval_duration') or 0)/1e9,
                 'tokens_per_second':output/((value.get('eval_duration') or 0)/1e9) if value.get('eval_duration') else None,
                 'load_seconds':(value.get('load_duration') or 0)/1e9,
-                'measurement':'Ollama native usage; cache and reasoning breakdown unavailable','phase':'provider_request'})
+                'measurement':'llama.cpp chat completion usage; optional provider breakdowns preserved','phase':'provider_request'})
         if body.get('stream'):
             client=httpx.AsyncClient(timeout=httpx.Timeout(900,connect=5),trust_env=False)
             try:
-                upstream=await client.send(client.build_request('POST','http://127.0.0.1:11434/api/chat',json=body),stream=True)
+                sending=asyncio.create_task(client.send(client.build_request('POST',BASE_URL+'/v1/chat/completions',json=request_body(body)),stream=True))
+                try:
+                    while not sending.done():
+                        if store.get(ident)['state']!='running' or await request.is_disconnected():
+                            raise HTTPException(409,'Inference interrupted')
+                        await asyncio.wait({sending},timeout=.2)
+                    upstream=await sending
+                finally:
+                    if not sending.done():
+                        sending.cancel();await asyncio.gather(sending,return_exceptions=True)
             except httpx.TransportError as error:
-                # Ollama dropping the connection (for example killed by the OOM killer) is a gateway failure the
+                # llama.cpp dropping the connection (for example killed by the OOM killer) is a gateway failure the
                 # engine may retry once, not an opaque internal error.
                 await client.aclose()
-                store.event(ident,'inference-error',{'upstream_status':None,'message':'Ollama connection failed: '+type(error).__name__})
-                raise HTTPException(502,'Ollama connection failed; see private inference-error event')
+                store.event(ident,'inference-error',{'upstream_status':None,'message':'llama.cpp connection failed: '+type(error).__name__})
+                raise HTTPException(502,'llama.cpp connection failed; see private inference-error event')
             except BaseException:
                 await client.aclose();raise
             if upstream.status_code!=200:
@@ -509,26 +650,27 @@ def create_app(store=None, start_workers=True):
                         async for chunk in upstream.aiter_bytes():
                             data.extend(chunk[:max(0,4096-len(data))])
                             if len(data)>=4096:break
-                    try:detail=json.loads(data).get('error','Ollama returned an error')
-                    except (ValueError,AttributeError):detail='Ollama returned a non-JSON error'
-                except (httpx.HTTPError,TimeoutError):detail='Ollama error body unavailable'
+                    try:detail=json.loads(data).get('error','llama.cpp returned an error')
+                    except (ValueError,AttributeError):detail='llama.cpp returned a non-JSON error'
+                except (httpx.HTTPError,TimeoutError):detail='llama.cpp error body unavailable'
                 finally:await upstream.aclose();await client.aclose()
                 store.event(ident,'inference-error',{'upstream_status':upstream.status_code,'message':str(detail)[:500]})
-                raise HTTPException(502,'Ollama request failed; see private inference-error event')
+                raise HTTPException(502,'llama.cpp request failed; see private inference-error event')
             async def native_stream():
                 recorded=False
                 try:
-                    async for line in upstream.aiter_lines():
+                    async for value in llama_stream(upstream):
                         if store.get(ident)['state']!='running' or await request.is_disconnected():break
-                        if not line:continue
-                        value=json.loads(line)
                         if value.get('done') and not recorded:
                             record_usage(value);recorded=True
-                        yield (line+'\n').encode()
+                        yield (json.dumps(value)+'\n').encode()
+                except (RuntimeError,ValueError,httpx.HTTPError) as error:
+                    store.event(ident,'inference-error',{'message':'llama.cpp stream incomplete: '+type(error).__name__})
+                    yield b'{"error":"llama.cpp stream incomplete"}\n'
                 finally:await upstream.aclose();await client.aclose()
             return StreamingResponse(native_stream(),media_type='application/x-ndjson')
         async with httpx.AsyncClient(timeout=httpx.Timeout(900,connect=5),trust_env=False) as client:
-            pending=asyncio.create_task(client.post('http://127.0.0.1:11434/api/chat',json=body))
+            pending=asyncio.create_task(client.post(BASE_URL+'/v1/chat/completions',json=request_body(body)))
             try:
                 while not pending.done():
                     if store.get(ident)['state']!='running' or await request.is_disconnected():
@@ -539,8 +681,8 @@ def create_app(store=None, start_workers=True):
             finally:
                 if not pending.done():pending.cancel()
         if response.status_code!=200:
-            raise HTTPException(502,'Ollama error: '+response.text[:800])
-        value=response.json()
+            raise HTTPException(502,'llama.cpp error: '+response.text[:800])
+        value=normalized(response.json())
         record_usage(value)
         return value
 
@@ -554,6 +696,23 @@ def create_app(store=None, start_workers=True):
 def main():
     import uvicorn
     os.umask(0o077)
-    uvicorn.run(create_app(),host='127.0.0.1',port=8765,access_log=False)
+    from .integration import state, save
+    if not state()['enabled'] and state()['phase']!='enabling':return
+    app=create_app()
+    server=uvicorn.Server(uvicorn.Config(app,host='127.0.0.1',port=8765,access_log=False))
+    async def serve():
+        async def watch_switch():
+            while not server.should_exit:
+                value=state()
+                if not value['enabled'] and value['phase']!='enabling':
+                    if not any(j['state']=='running' for j in app.state.store.list(10000,include_shadow=True)):
+                        value.update(phase='disabled',draining_job=None);save(value)
+                        server.should_exit=True
+                        return
+                await asyncio.sleep(.3)
+        watcher=asyncio.create_task(watch_switch())
+        try:await server.serve()
+        finally:watcher.cancel();await asyncio.gather(watcher,return_exceptions=True)
+    asyncio.run(serve())
 
 if __name__=='__main__':main()

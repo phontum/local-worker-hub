@@ -107,7 +107,7 @@ class Caller:
 
 def write_session(directory, label, caller, prompt, content, blocks=()):
     saved = [{'type': 'user', 'text': prompt}, {'type': 'assistant', 'finish': 'stop', 'content': [*blocks, {'type': 'text', 'text': content}]}]
-    session = {'info': {'id': caller.sid, 'outcome': 'succeeded', 'engine': 'ollama-direct', 'generations': [{'phase': g.name, 'step': g.step, 'done_reason': g.done_reason, 'output_tokens': g.output_tokens, 'limit': g.limit, 'truncated': g.truncated} for g in caller.generations], 'location': {'directory': str(directory / 'workspace')}}, 'messages': saved}
+    session = {'info': {'id': caller.sid, 'outcome': 'succeeded', 'engine': 'llama.cpp-direct', 'generations': [{'phase': g.name, 'step': g.step, 'done_reason': g.done_reason, 'output_tokens': g.output_tokens, 'limit': g.limit, 'truncated': g.truncated} for g in caller.generations], 'location': {'directory': str(directory / 'workspace')}}, 'messages': saved}
     path = directory / (label + '.session.json')
     path.write_text(json.dumps(session))
     path.chmod(0o600)

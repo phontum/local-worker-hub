@@ -29,21 +29,21 @@ async def test_enough_memory_does_nothing(monkeypatch):
     assert await service.relieve_memory() is None and FakeClient.posts==[]
 
 @pytest.mark.asyncio
-async def test_low_memory_unloads_resident_models(monkeypatch):
+async def test_low_memory_refuses_inference_without_touching_services(monkeypatch):
     monkeypatch.setattr(service.psutil,'virtual_memory',lambda:Memory(1200*2**20))
     result=await service.relieve_memory()
-    assert result=={'available_mb':1200,'threshold_mb':2500,'unloaded':['gemma4:12b-it-qat']}
-    assert FakeClient.posts[0][1]=={'model':'gemma4:12b-it-qat','keep_alive':0}
+    assert result=={'available_mb':1200,'threshold_mb':2500,'action':'refuse_inference'}
+    assert FakeClient.posts==[]
 
 @pytest.mark.asyncio
-async def test_unreachable_ollama_is_reported_not_raised(monkeypatch):
+async def test_low_memory_requires_no_provider_connection(monkeypatch):
     import httpx
     monkeypatch.setattr(service.psutil,'virtual_memory',lambda:Memory(100*2**20))
     async def broken(self,url):raise httpx.ConnectError('down')
     monkeypatch.setattr(FakeClient,'get',broken)
-    assert (await service.relieve_memory())['error']=='Ollama unavailable'
+    assert (await service.relieve_memory())['action']=='refuse_inference'
 
-def test_dropped_ollama_connection_is_a_retryable_gateway_error(store,monkeypatch):
+def test_dropped_llama_connection_is_a_retryable_gateway_error(store,monkeypatch):
     import httpx
     from fastapi.testclient import TestClient
     from hub.models import JobRequest
@@ -60,4 +60,4 @@ def test_dropped_ollama_connection_is_a_retryable_gateway_error(store,monkeypatc
         response=c.post('/inference/'+job['id']+'/chat',headers={'Authorization':'Bearer '+initialize()},
             json={'model':'qwen3.5:9b','stream':True,'options':{'num_ctx':16384,'num_predict':100},'messages':[]})
     assert response.status_code==502
-    assert [e['data']['message'] for e in store.all_events(job['id']) if e['kind']=='inference-error']==['Ollama connection failed: RemoteProtocolError']
+    assert [e['data']['message'] for e in store.all_events(job['id']) if e['kind']=='inference-error']==['llama.cpp connection failed: RemoteProtocolError']

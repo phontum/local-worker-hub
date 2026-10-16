@@ -7,7 +7,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 STATE = Path(os.environ.get('LOCAL_WORKER_STATE', str(Path.home() / '.local/state/opencode/local-worker')))
 CONFIG = Path(os.environ.get('LOCAL_WORKER_CONFIG', str(Path.home() / '.config/local-worker')))
 URL = 'http://127.0.0.1:8765'
-MODEL = 'ollama/qwen3.5:9b'
+MODEL = 'llama.cpp/gemma4:12b-it-qat'
 
 def initialize():
     for p in (STATE, CONFIG, STATE / 'jobs'):

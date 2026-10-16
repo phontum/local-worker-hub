@@ -1,0 +1,17 @@
+#!/bin/bash
+# Run after the independently installed llama.cpp server has passed live validation.
+set -euo pipefail
+if [[ $EUID != 0 ]]; then
+  echo 'Run with sudo: sudo scripts/remove-ollama-system' >&2
+  exit 1
+fi
+curl --fail --silent --max-time 5 http://127.0.0.1:8080/health > /dev/null
+systemctl disable --now ollama.service
+rm -f /etc/systemd/system/ollama.service
+rm -rf /etc/systemd/system/ollama.service.d
+systemctl daemon-reload
+rm -f /usr/local/bin/ollama
+rm -rf /usr/local/lib/ollama /usr/share/ollama
+if getent passwd ollama > /dev/null; then userdel ollama; fi
+if getent group ollama > /dev/null; then groupdel ollama; fi
+printf 'Removed the Linux Ollama service, binary, libraries, model store and service account.\n'

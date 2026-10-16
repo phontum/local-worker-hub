@@ -31,9 +31,21 @@ def refuse_unfilled(argv):
     """True when an argv still holds the template placeholder; such a command must never be executed."""
     return any(PLACEHOLDER in part for part in argv)
 
-def recommend(index, changed, templates, history=None, limit=8):
+def recommend(index, changed, templates, history=None, limit=8, graph=None):
     """Ranked tests plus, for each approved template check, the concrete check to run on them (never a model-written command)."""
     ranked = select(index, changed, history, limit)
+    links=[]
+    if graph:
+        from hub.skills.coding.intelligence.changegraph import explain
+        links=explain(graph,changed)
+        by_path={r['path']:r for r in ranked}
+        for link in links:
+            path=link['to'].removeprefix('file:')
+            if not link['to'].startswith('file:') or not valid_test_paths([path],index):continue
+            row=by_path.setdefault(path,{'path':path,'score':0,'reasons':[]})
+            row['score']+=min(2,link['support']/5)*link['frequency']
+            row['reasons'].append(f"co-changes with {link['from']} in {link['support']} reviewed/history observations (frequency {link['frequency']:.2f}, lift {link['lift']:.2f})")
+        ranked=sorted(by_path.values(),key=lambda r:(-r['score'],r['path']))[:limit]
     paths = [r['path'] for r in ranked]
     checks = [filled for t in templates if (filled := fill_template(t, paths, index))]
-    return {'tests': ranked, 'checks': checks, 'note': 'derived from imports, names, mentioned symbols and recorded failures; run the full suite when unsure'}
+    return {'co_change_evidence':links,'tests': ranked, 'checks': checks, 'note': 'derived from imports, names, mentioned symbols and recorded failures; run the full suite when unsure'}

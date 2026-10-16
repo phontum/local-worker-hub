@@ -70,7 +70,7 @@ acceptance. Freshness checks stay inside the tool; editors need not copy hashes.
 ## Cheap validation and reviewed project checks
 
 Validator jobs now return deterministic command evidence by default, even when
-Ollama is unavailable. They use zero model tokens. Set `summary_mode=local` only
+llama.cpp is unavailable. They use zero model tokens. Set `summary_mode=local` only
 when a model interpretation is useful, or analyze an already finished job without
 rerunning commands:
 
@@ -146,7 +146,7 @@ remain unknown unless separately measured. `--model-context 32768` and
 | Researcher | Configured public search and hosted page extraction; no repository or context attachment |
 | Personal | General public questions and configured public search/fetch; no repository or private account access |
 
-There is one FIFO executor, one Ollama inference slot, one resident model at a time
+There is one FIFO executor, one llama.cpp inference slot, one resident model at a time
 (Gemma 4 12B by default; Qwen3.5 9B for board triage and some proposals), and a
 16K default model context. Eight tool rounds and at most 18 model steps bound exploration;
 older large tool outputs are shortened and a final tools-disabled turn is reserved.
@@ -160,7 +160,7 @@ and sanitized generic examples. It retrieves text, rather than running a logged-
 browser. No OpenRouter account or cloud inference is required. Public URLs are
 validated before requesting fetches; provider failures stay visible in the report.
 
-The hub uses direct Ollama inference with role-bound adapters. A live compatibility
+The hub uses direct llama.cpp inference with role-bound adapters. A live compatibility
 test on installed OpenCode v2.0.22 connected the MCP server but sent an empty tool
 list to the model. The original OpenCode configuration is preserved; the archived
 launcher and experimental adapter are not the active execution path. Revalidate
@@ -168,7 +168,7 @@ before switching back. Do not substitute a permissive legacy agent.
 
 ## Measurement and acceptance
 
-Local input/cache/output counts come from actual Ollama usage, including unsuccessful
+Local input/cache/output counts come from actual llama.cpp usage, including unsuccessful
 completed responses and recovery. Interrupted requests may not return token counts
 and are not extrapolated. Context is the timestamped last completed request, not a live
 exact tokenizer view. Native inference now streams thinking/content and scoped tool results. Token counts are recorded only

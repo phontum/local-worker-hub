@@ -1,10 +1,27 @@
 # Local Worker Hub
 
+> **Abandoned — October 16, 2026.** This project failed to achieve its goal of
+> reliably reducing frontier-agent work through local-model delegation. Development
+> has stopped; no further maintenance or support is planned. The source and historical
+> documentation remain available for reference.
+
+Real-world use required too much review, correction and takeover to justify routine
+model delegation. In the final usage review, only 2 of 12 editing jobs that used a
+model were accepted without takeover, and only 1 of 4 investigation jobs was
+accepted. Deterministic validation and exact replacements were useful, but they
+did not establish the value of the local model. Net time, frontier-token and
+financial savings were never demonstrated with matched end-to-end measurements.
+These are observations from a small, mixed-version usage sample, not a general
+benchmark of local models. Private job histories and project data are not published.
+
+The documentation below describes the abandoned implementation and is retained
+for historical reference, not as a recommendation to adopt it.
+
 A local AI helper for frontier agents and everyday questions. Delegate bounded
-file discovery, small edits, checks and public research to Ollama while Codex or
+file discovery, small edits, checks and public research to llama.cpp while Codex or
 Claude handles architecture, ambiguous decisions and final acceptance.
 
-The hub talks directly to Ollama. It needs no OpenRouter account or cloud model.
+The hub talks directly to standalone llama.cpp. It needs no OpenRouter account or cloud model.
 Public search uses a hosted provider; inference and repository tools run locally.
 
 ## What it does
@@ -32,16 +49,14 @@ net frontier-token and financial savings have not been established.
 - Linux or WSL2. Background setup uses a **systemd user service**;
   native Windows service installation is not provided.
 - Python 3.11+, [uv](https://docs.astral.sh/uv/) and Node.js 20.19+ with npm.
-- [Ollama](https://ollama.com/) listening at `127.0.0.1:11434` with
-  `gemma4:12b-it-qat` (default, 7.2 GB) and `qwen3.5:9b` downloaded; the board uses both,
-  one at a time. Hardware must fit the model and context; GPU telemetry is optional
-  and depends on available system tools.
+- [llama.cpp](https://github.com/ggml-org/llama.cpp/tree/master/tools/server) `llama-server`
+  listening at `127.0.0.1:8080`, serving a Gemma 4 12B GGUF with alias
+  `gemma4:12b-it-qat`. Hardware must fit the model and context; GPU telemetry is optional.
 - Internet access for dependencies and public web questions. Repository-only
   tasks can run offline after dependencies and the model are installed.
 
-On a host with about 8 GB of RAM (for example a default WSL2 VM), set `LLAMA_ARG_CACHE_RAM=512` in the
-Ollama service environment: llama.cpp's prompt cache lives in host RAM and otherwise grows until the OOM killer
-stops Ollama. `local-worker doctor` reports whether it is configured.
+The managed llama.cpp service limits its host prompt cache to 512 MiB and has one inference
+slot. The hub refuses new inference when host memory is low. It has no Ollama backend or fallback.
 
 Keep inference concurrency at one and use 16K until measurements justify
 larger contexts. Extended mode increases memory use and does not guarantee better answers.
@@ -57,8 +72,8 @@ cd local-worker-hub
 uv sync --frozen
 # Browser used only to read pages that need JavaScript (about 150 MB; skip it and those pages fall back to hosted text).
 .venv/bin/playwright install chromium
-ollama pull gemma4:12b-it-qat
-ollama pull qwen3.5:9b
+# Install standalone llama.cpp and obtain the Gemma GGUF, then configure its user service.
+./scripts/setup-llama --binary /path/to/llama-server --model /path/to/gemma4.gguf
 npm --prefix frontend ci
 npm --prefix frontend run build
 
@@ -72,8 +87,8 @@ local-worker doctor
 local-worker dashboard
 ```
 
-Ensure Ollama is running before model tasks (`ollama serve` if your installation
-does not start it automatically). Open `http://127.0.0.1:8765` and enter the
+Ensure llama.cpp is ready before model tasks (`curl --fail http://127.0.0.1:8080/health`).
+Open `http://127.0.0.1:8765` and enter the
 one-time pairing code printed by `dashboard`. Browser sessions expire after eight
 hours or a service restart; generate another code to reconnect.
 
@@ -244,3 +259,27 @@ Local token counts describe actual Ollama workload. Optional API-equivalent cost
 estimates require dated comparison rates and are not subscription dollars saved.
 Any net savings claim needs a matched frontier baseline including delegation,
 review, retries and takeover.
+
+## Experimental learning and execution
+
+See [EXPERIMENTS.md](docs/EXPERIMENTS.md) for shadow observations, final-patch comparisons,
+recipe promotion, minimization, repository slices, causal validation, hybrid execution,
+co-change recommendations and review-cost evidence. Flags are off by default.
+
+```sh
+local-worker off                 # detach known Claude/Codex integrations and block execution
+local-worker on                  # restore only detached components, preserving unrelated settings
+local-worker integration status
+# These work independently of the hub service:
+./scripts/local-worker-switch off
+./scripts/local-worker-switch on
+```
+
+Start fresh Claude/Codex sessions after switching. Off cancels queued jobs and lets a running
+private job drain before stopping the hub; apply is blocked immediately. Unknown custom
+instructions and configuration conflicts are reported as residuals, never silently overwritten.
+
+For an existing Linux Ollama installation, after validating independent llama.cpp generation,
+`sudo ./scripts/remove-ollama-system` removes its service, binary, libraries, model store and
+service account. Existing Local Worker history is preserved. This script does not uninstall a
+separate Windows application.

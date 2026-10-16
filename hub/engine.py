@@ -36,7 +36,7 @@ async def chat_response(client, url, body, headers, on_segment):
                 text=chunk.get(kind) or ''
                 if text:message[kind]+=text;on_segment(kind,text)
             for call in chunk.get('tool_calls') or []:
-                # Native Ollama emits complete structured calls, not JSON argument text deltas.
+                # The gateway emits complete structured calls, not JSON argument text deltas.
                 if not isinstance(call,dict) or not isinstance(call.get('function'),dict):raise ValueError('Malformed tool call')
                 message['tool_calls'].append(call)
             if value.get('done'):
@@ -125,7 +125,7 @@ async def run(directory,label,prompt,report_only=False,phase='work'):
     plan_path=directory/(('answer-review' if phase=='answer_review' else 'work')+'.research-plan.json')
     async with httpx.AsyncClient(timeout=httpx.Timeout(900,connect=5),trust_env=False) as client:
         for step in range(steps):
-            # Estimate conservatively until Ollama returns the measured prompt count.
+            # Estimate conservatively until llama.cpp returns the measured prompt count.
             budget=context-output_limit-512
             estimate=lambda: (len(json.dumps(messages,ensure_ascii=False))+len(json.dumps(tools)))/3
             if estimate()>budget:
@@ -296,7 +296,7 @@ async def run(directory,label,prompt,report_only=False,phase='work'):
                 saved[-1]['content'].append({'type':'tool','name':name,'arguments':call['function'].get('arguments') or {},'state':{'status':status,'content':[{'type':'text','text':output}]}})
                 event({'type':'tool','tool':name,'state':{'status':status}})
     session={'info':{'id':sid,'outcome':'succeeded' if finish=='stop' else 'partial',
-        'engine':'ollama-direct','location':{'directory':str(directory/'workspace')}},'messages':saved}
+        'engine':'llama.cpp-direct','location':{'directory':str(directory/'workspace')}},'messages':saved}
     path=directory/(label+'.session.json');path.write_text(json.dumps(session));path.chmod(0o600)
 
 def main():

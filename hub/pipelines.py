@@ -272,7 +272,7 @@ def run_literal(directory, request):
 
 async def run_edit(directory, label, prompt, phase='work'):
     request = JobRequest.model_validate_json((directory / 'request.json').read_text())
-    if request.literal_mappings:
+    if request.literal_mappings and request.execution_mode!='hybrid':
         explicit='\nExplicit literal mappings (all are required):\n'+json.dumps([m.model_dump() for m in request.literal_mappings])
         request=request.model_copy(update={'task':request.task+explicit})
         prompt+=explicit
@@ -310,7 +310,7 @@ async def run_edit(directory, label, prompt, phase='work'):
         (directory / (label + '.context.json')).write_text(json.dumps(packed.report))
         (directory / (label + '.context.json')).chmod(0o600)
         pairs = mappings.extract(request.task)
-        if len(pairs) >= 2 and len(packed.report['coverage']['missing_mappings']) == len(pairs):
+        if request.execution_mode!='hybrid' and len(pairs) >= 2 and len(packed.report['coverage']['missing_mappings']) == len(pairs):
             reason = f"None of the {len(pairs)} `old -> new` texts in the task exist in the authorized files ({', '.join(sorted(snapshots))}); the authorized paths are probably wrong"
             write_session(directory, label, caller, prompt, envelope('BLOCKED', reason + '. No model call was made.', risks=reason))
             return
@@ -385,7 +385,7 @@ async def run_edit(directory, label, prompt, phase='work'):
         errors = await run_unit(request.task, list(snapshots), prompt, 0)
         state['unit_log'].append({'index': 0, 'files': list(snapshots), 'ok': not errors})
         changed = []
-        if staged and not errors and request.literal_mappings:
+        if staged and not errors and request.literal_mappings and request.execution_mode!='hybrid':
             verification=mappings.verify_literals(request.literal_mappings,{p:s[1] or '' for p,s in snapshots.items()},
                                                   {p:staged.get(p,s[1] or '') for p,s in snapshots.items()})
             errors += [f"{m.get('path') or 'mapping'}: {m['reason']}" for m in verification['unmet']]

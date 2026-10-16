@@ -4,6 +4,8 @@ from pathlib import Path
 import re
 from .model_registry import models as registered_models
 from .skills.coding.editing.mappings import LiteralMapping
+from .skills.coding.execution.options import ExperimentPolicy
+from .skills.coding.editing.recipes import Operation
 
 Role = Literal['investigator', 'editor', 'validator', 'researcher', 'personal']
 
@@ -81,7 +83,14 @@ class JobRequest(BaseModel):
     history: list[Turn] = Field(default_factory=list, max_length=6)
     spec: dict | None = None  # the DelegationSpec this job was compiled from (hub.spec); its mechanical criteria are verified after the edit
     literal_mappings: list[LiteralMapping] = Field(default_factory=list, max_length=80)
-    execution_mode: Literal['model', 'literal'] = 'model'
+    execution_mode: Literal['model', 'literal', 'hybrid'] = 'model'
+    task_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
+    purpose: Literal['production','shadow'] = 'production'
+    experiments: ExperimentPolicy = Field(default_factory=ExperimentPolicy)
+    deterministic_operations: list[Operation] = Field(default_factory=list,max_length=80)
+    deterministic_only: bool = False
+    recipe_id: str | None = Field(default=None,pattern=r'^[a-f0-9]{24}$')
+    recipe_parameters: dict[str,str] = Field(default_factory=dict,max_length=20)
 
     @model_validator(mode='before')
     @classmethod
@@ -93,6 +102,18 @@ class JobRequest(BaseModel):
 
     @model_validator(mode='after')
     def boundaries(self):
+        if any(e.path not in self.allowed_paths for case in self.experiments.metamorphic_cases for e in case.edits):
+            raise ValueError('Metamorphic edits require explicit edit scope')
+        if not set(self.experiments.fix_paths).issubset(self.allowed_paths):raise ValueError('Counterfactual fix paths require explicit edit scope')
+        if self.purpose=='shadow' and (self.in_place or self.workspace_from):
+            raise ValueError('Shadows cannot write in place or continue other workspaces')
+        if self.execution_mode=='hybrid' and (self.role!='editor' or not (self.literal_mappings or self.deterministic_operations) or self.in_place):
+            raise ValueError('Hybrid execution needs typed mappings and a private Editor workspace')
+        if self.deterministic_operations and (self.role!='editor' or self.execution_mode!='hybrid'):
+            raise ValueError('Deterministic operations require hybrid Editor execution')
+        if any(op.path not in self.allowed_paths for op in self.deterministic_operations):
+            raise ValueError('Deterministic operation is outside edit scope')
+        if self.deterministic_only and self.execution_mode!='hybrid':raise ValueError('deterministic_only requires hybrid execution')
         for mapping in self.literal_mappings:
             if mapping.path and mapping.path not in self.allowed_paths:
                 raise ValueError('Mapping path must be an authorized editable file')
@@ -270,6 +291,9 @@ class FrontierUsage(BaseModel):
 
 
 class Review(BaseModel):
+    patch_labels: list[Literal['completely_wrong','nearly_correct','right_idea_wrong_implementation','correct_with_extras','partial_solution','equivalent_solution','unknown']] = Field(default_factory=list,max_length=7)
+    requirements: dict[str,Literal['met','unmet','unknown']] = Field(default_factory=dict,max_length=100)
+    requirement_evidence: dict[str,str] = Field(default_factory=dict,max_length=100)
     decision: Literal['accepted', 'rejected', 'takeover']
     notes: str = Field(default='', max_length=4000)
     reason: Literal['truncated', 'wrong_edit', 'oversized', 'no_change', 'check_failed', 'scope', 'wrong_localization', 'context_missing', 'other'] | None = None
@@ -285,6 +309,8 @@ class Review(BaseModel):
 
     @model_validator(mode='after')
     def say_why(self):
+        if any(status=='met' and not self.requirement_evidence.get(key) for key,status in self.requirements.items()):
+            raise ValueError('Met requirements require supporting evidence')
         for arm in ('baseline', 'delegated'):
             usage = getattr(self, arm + '_usage')
             if usage:

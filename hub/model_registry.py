@@ -16,7 +16,7 @@ DEFAULTS = {
     'coder7': {'name': 'qwen2.5-coder:7b', 'num_ctx': 16384},
 }
 CONTEXTS = (16384, 32768)
-OLLAMA = 'http://127.0.0.1:11434'
+from .llama_backend import BASE_URL
 
 def models():
     result = {alias: dict(value) for alias, value in DEFAULTS.items()}
@@ -48,26 +48,23 @@ def allowed_names():
     return {value['name'] for value in models().values()}
 
 def probe(name, timeout=5):
-    """Ask Ollama what the installed model supports. Never raises."""
+    """Probe the models actually served by llama.cpp; never infer residency."""
     try:
         with httpx.Client(timeout=timeout, trust_env=False) as client:
-            response = client.post(OLLAMA + '/api/show', json={'model': name})
-        if response.status_code != 200:
-            return {'installed': False, 'status': response.status_code}
-        data = response.json()
-        return {'installed': True, 'capabilities': data.get('capabilities') or [],
-                'parameter_size': (data.get('details') or {}).get('parameter_size'),
-                'quantization': (data.get('details') or {}).get('quantization_level')}
+            response = client.get(BASE_URL + '/v1/models')
+            response.raise_for_status()
+            rows = response.json().get('data', [])
+        return {'installed': any(row.get('id') == name for row in rows), 'capabilities': ['completion']}
     except (httpx.HTTPError, ValueError):
-        return {'installed': None, 'error': 'Ollama unavailable'}
+        return {'installed': None, 'error': 'llama.cpp unavailable'}
 
 def residency(timeout=5):
-    """Loaded models and the share of each resident on the GPU, from Ollama's /api/ps."""
     try:
         with httpx.Client(timeout=timeout, trust_env=False) as client:
-            rows = client.get(OLLAMA + '/api/ps').json().get('models', [])
+            response = client.get(BASE_URL + '/v1/models')
+            response.raise_for_status()
+            rows = response.json().get('data', [])
+        return [{'name': row.get('id'), 'size': None, 'size_vram': None,
+                 'on_gpu_fraction': None, 'context': None} for row in rows]
     except (httpx.HTTPError, ValueError):
         return None
-    return [{'name': row.get('name'), 'size': row.get('size'), 'size_vram': row.get('size_vram'),
-             'on_gpu_fraction': round(row['size_vram'] / row['size'], 3) if row.get('size') else None,
-             'context': row.get('context_length')} for row in rows]

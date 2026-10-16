@@ -46,7 +46,7 @@ def resolve_phase(request, profiles, phase, report_only=False):
         tool_groups=tuple(str(g) for g in profile['tool_groups']) if isinstance(profile.get('tool_groups'), list) else None), profile
 
 async def model_support(spec):
-    """Capabilities Ollama reports for a non-default model; None when unknown or default (no gating)."""
+    """Capabilities llama.cpp reports for a non-default model; None when unknown or default (no gating)."""
     if spec.alias == DEFAULT_ALIAS:
         return None
     found = await asyncio.to_thread(probe, spec.model)

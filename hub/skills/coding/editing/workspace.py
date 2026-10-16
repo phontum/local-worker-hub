@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from hub.scoped import EXCLUDED, ScopeError, sensitive
 from hub.settings import STATE
+from hub.skills.coding.execution.control import active_operation
 
 ROOT = STATE / 'workspaces'
 MAX_TOTAL = 300_000_000
@@ -211,6 +212,7 @@ def chain(origin, ident, parent, allowed_paths, dependencies=(), delete_paths=()
     """Start a job inside an earlier job's workspace, so several bounded jobs build on each other and one apply writes them all.
     The earlier job's changes become the new baseline for this job's own diff; conflicts are still judged against your tree."""
     previous = read_record(parent)
+    if previous.get('shadow'):raise WorkspaceError('Shadow workspaces cannot be continued')
     if previous['state'] != 'ready':
         raise WorkspaceError(f"Cannot continue from a workspace that is {previous['state']}")
     if Path(origin).resolve() != Path(previous['origin']):
@@ -382,6 +384,7 @@ def recover(ident=None):
         rolled.append(job)
     return rolled
 
+@active_operation
 def apply(ident, accept_removals=False, revalidate_first=False, run_checks=False, accept_stale=False):
     """Write the changed authorized files into the user's tree, but only if none of them changed there since the snapshot.
 
@@ -390,7 +393,10 @@ def apply(ident, accept_removals=False, revalidate_first=False, run_checks=False
     Files the job only read (read_paths, evidence) that changed since the snapshot make the patch unverified against current code: apply refuses unless
     `revalidate_first` passes or `accept_stale` is set.
     `run_checks` runs them in your tree after the write (no automatic revert; use `revert`)."""
+    from hub.skills.coding.execution.control import require_enabled
+    require_enabled()
     record = read_record(ident)
+    if record.get('shadow'):raise WorkspaceError('Shadow workspaces can never be applied')
     if record['state'] == 'chained':
         raise WorkspaceError('This workspace was continued by job ' + str(record.get('chained_into')) + '; apply that job, which includes these changes')
     if record['state'] != 'ready':

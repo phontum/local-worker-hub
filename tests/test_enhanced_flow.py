@@ -154,11 +154,12 @@ def test_native_stream_usage_once_and_upstream_closed(monkeypatch,store,outcome)
     closed=[]
     class Chunks(httpx.AsyncByteStream):
         async def __aiter__(self):
-            yield b'{"message":{"thinking":"local trace"},"done":false}\n'
+            yield b'data: {"choices":[{"delta":{"reasoning_content":"local trace"}}]}\n\n'
             if outcome=='cancelled':store.cancel(job['id'])
             if outcome!='incomplete':
-                yield b'{"message":{"content":"answer"},"done":true,"prompt_eval_count":10,"eval_count":5}\n'
-                yield b'{"done":true,"prompt_eval_count":10,"eval_count":5}\n'
+                yield b'data: {"choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}]}\n\n'
+                yield b'data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\n'
+                yield b'data: [DONE]\n\n'
         async def aclose(self):closed.append(True)
     async def send(client,request,**kwargs):return httpx.Response(200,stream=Chunks(),request=request)
     monkeypatch.setattr(httpx.AsyncClient,'send',send)

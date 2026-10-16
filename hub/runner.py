@@ -136,6 +136,11 @@ class Runner:
             budget=min(budget,self.model_remaining.get(job['id'],request.model_budget()))
             if budget<1:raise TimeoutError('Cumulative model-work budget exhausted')
         started=time.monotonic()
+        from .experimental_runtime import prepare_slice, finish_slice
+        prepared=await asyncio.to_thread(prepare_slice,request,directory,label,job['request'].get('repo'))
+        original_request=(directory/'request.json').read_text() if prepared else None
+        if prepared:
+            (directory/'request.json').write_text(request.model_copy(update={'repo':str(prepared['root'])}).model_dump_json())
         try:
             await self.process([sys.executable,'-m','hub.engine','--job-dir',str(directory),'--label',label,
                 '--prompt',prompt,*(['--report-only'] if recovery else []),*(['--phase',phase] if phase else [])],job,directory,label,
@@ -143,12 +148,14 @@ class Runner:
                     'PYTHONPATH':str(PROJECT),'PWD':str(directory/'workspace'),
                     'LOCAL_WORKER_STATE':str(STATE),'LOCAL_WORKER_CONFIG':str(CONFIG)},budget)
         finally:
+            if prepared:(directory/'request.json').write_text(original_request)
             if job['id'] in self.model_remaining:self.model_remaining[job['id']]=max(0,self.model_remaining[job['id']]-(time.monotonic()-started))
+        if prepared:await asyncio.to_thread(finish_slice,request,prepared)
         session=json.loads((directory/(label+'.session.json')).read_text())
         if session.get('info',{}).get('location',{}).get('directory')!=str(directory/'workspace'):
             raise RuntimeError('Worker workspace identity mismatch')
         self.store.event(job['id'],'session',{'id':session['info']['id'],'phase':label,
-            'workspace':str(directory/'workspace'),'repo':request.repo,'engine':'ollama-direct'})
+            'workspace':str(directory/'workspace'),'repo':request.repo,'engine':'llama.cpp-direct'})
         report=final_report(session)
         if report and (request.role=='investigator' or phase=='investigate') and report['status']=='COMPLETE':
             events=[json.loads(line) for line in (directory/'tools.jsonl').read_text().splitlines()] if (directory/'tools.jsonl').exists() else []
@@ -232,7 +239,14 @@ class Runner:
                             raise ScopeError('TEST_DATABASE_URL must name a local PostgreSQL database ending in _test')
                     with out_path.open('wb') as out:
                         out_path.chmod(0o600)
-                        p=await asyncio.create_subprocess_exec(*check.argv,cwd=cwd,env=env,stdout=out,stderr=asyncio.subprocess.STDOUT,
+                        argv=check.argv
+                        if request.purpose=='shadow':
+                            from .skills.coding.execution.isolation import command
+                            from .taskstore import Tasks
+                            observation=Tasks(self.store).get(request.task_id)
+                            argv=command(argv,files.root,observation['baseline'].get('dependencies',[]))
+                            position=argv.index('--chdir');argv[position+1]=str(cwd)
+                        p=await asyncio.create_subprocess_exec(*argv,cwd=cwd,env=env,stdout=out,stderr=asyncio.subprocess.STDOUT,
                                                               stdin=asyncio.subprocess.DEVNULL,start_new_session=True)
                         self.active[job['id']]=p;last_size=0
                         try:
@@ -473,6 +487,9 @@ class Runner:
                     # The worker edits and checks a private copy; the user's tree changes only through apply_result.
                     self.phase(job['id'],'workspace')
                     await asyncio.to_thread(workspace.purge_old)
+                    from .skills.coding.editing.candidates import purge
+                    await asyncio.to_thread(purge)
+                    await asyncio.to_thread(purge,STATE/'jobs')
                     parent=request.workspace_from
                     checks_json=[c.model_dump() for c in request.checks]
                     tracked=list(dict.fromkeys(request.read_paths+evidence_paths(self.store,request)))  # everything the patch may rest on, not only read_paths
@@ -481,6 +498,9 @@ class Runner:
                     else:
                         workspace_record=await asyncio.to_thread(workspace.create,request.repo,job['id'],request.allowed_paths,tracked,request.delete_paths,checks_json)
                     origin_repo=request.repo
+                    if request.purpose=='shadow':
+                        workspace_record['shadow']=True
+                        workspace.write_record(job['id'],workspace_record)
                     request=request.model_copy(update={'repo':workspace_record['path']})
                     (directory/'request.json').write_text(request.model_dump_json())
                 if request.kind=='regression_test':
@@ -501,13 +521,28 @@ class Runner:
                 before=await asyncio.to_thread(self.snapshot,request,directory,'before')
             self.store.event(job['id'],'started',{'role':request.role,'repo':request.repo,'model':MODEL if request.execution_mode!='literal' and (request.role!='validator' or request.summary_mode=='local') else None})
             if request.role=='validator' and not request.source_job_id:checks=await self.checks(job,request,directory)
+            deterministic_receipts=[]
+            if request.execution_mode=='hybrid':
+                from .experimental_runtime import deterministic
+                if request.recipe_id:
+                    from .skills.coding.editing.recipes import resolve
+                    recipe,ops=resolve(origin_repo,request.recipe_id,request.recipe_parameters)
+                    request=request.model_copy(update={'deterministic_operations':ops})
+                deterministic_receipts=await asyncio.to_thread(deterministic,request,directory)
             prompt=f'Task:\n{request.task}\n\nSelected project context:\n{request.context}\n'
             from .evidence import prepare_evidence
             prompt+=prepare_evidence(self.store,request,directory)
             if request.role=='validator':prompt+='\nObserved checks:\n'+analysis_evidence(checks)
             if request.role=='editor':prompt+='\nAuthorized files: '+json.dumps(request.allowed_paths)
+            if deterministic_receipts:
+                prompt+='\nCompleted deterministic operations (preserve their postconditions): '+json.dumps(deterministic_receipts)
+            if request.role=='editor':
+                prompt+='\nMinimize review effort: preserve formatting, edit only required symbols, and explain which acceptance criterion each semantic change satisfies.'
             answer_review=None;board_result=None
-            if request.execution_mode=='literal':
+            if request.execution_mode=='hybrid' and request.deterministic_only:
+                report=parse_report('LOCAL_WORKER_REPORT\nStatus: COMPLETE\nFindings:\nApplied approved deterministic operations; no model inference.\nFiles:\n'+ '\n'.join(request.allowed_paths)+'\nChecks:\nApproved checks follow.\nRisks:\nFrontier review required.\nEND_LOCAL_WORKER_REPORT')
+                checks=await self.checks(job,request,directory) if request.checks else []
+            elif request.execution_mode=='literal':
                 from .pipelines import run_literal
                 self.phase(job['id'],'literal-edit')
                 report=await asyncio.to_thread(run_literal,directory,request)
@@ -549,6 +584,13 @@ class Runner:
                 sessions.append(session)
                 if recovered and recovered['status'] in ('PARTIAL','BLOCKED'):report=recovered
             if request.role=='editor' and request.execution_mode!='literal' and request.checks and request.workflow=='single' and not request.needs_answer_review():checks=await self.checks(job,request,directory)
+            experiment_evidence={}
+            if request.role=='editor':
+                from .experimental_runtime import postprocess
+                experiment_evidence=await asyncio.to_thread(postprocess,request,directory,originals,checks,origin_repo)
+                if (request.experiments.required_causal_test and not experiment_evidence.get('causal',{}).get('required_passed')) or (any(c.required for c in request.experiments.metamorphic_cases) and not experiment_evidence.get('metamorphic',{}).get('required_passed')):
+                    if report:report={**report,'status':'PARTIAL','report':report['report'].replace('Status: COMPLETE','Status: PARTIAL',1)}
+                    experiment_evidence['required_causal_gate']='unmet'
             self.phase(job['id'],'finalizing')
             after=await asyncio.to_thread(self.snapshot,request,directory,'after') if not request.source_job_id else None
             if request.role=='editor':
@@ -575,6 +617,12 @@ class Runner:
                     if mapping_result['unmet']:
                         mapping_issue='Task mappings not fully applied: '+'; '.join(f"'{m['old']}' -> '{m['new']}' ({m['reason']}{', still '+str(m['remaining'])+' time(s)' if m['remaining'] else ''})" for m in mapping_result['unmet'][:4])
                 except (OSError,UnicodeError):pass
+            deterministic_verification=None
+            if request.deterministic_operations:
+                from .skills.coding.editing.recipes import verify_operations
+                deterministic_verification=verify_operations(originals,after_files,request.deterministic_operations)
+                if deterministic_verification['unmet']:
+                    mapping_issue=((mapping_issue+'; ') if mapping_issue else '')+'Declared deterministic operations were altered or not preserved'
             spec_result=None
             if request.spec and request.role=='editor' and originals:
                 try:
@@ -606,6 +654,8 @@ class Runner:
                 'workspace_verified':not bool(request.source_job_id),'repo':request.repo,'review':'unreviewed','checks_failed':check_failure,
                 'report_origin':'model' if sessions else 'harness','source_job_id':request.source_job_id,
                 'attempts':attempts,'workflow':request.workflow,'answer_review':answer_review,'board':board_result}
+            if experiment_evidence:result['experiments']=experiment_evidence
+            if deterministic_receipts:result['deterministic']=deterministic_receipts
             investigation=directory/'work.investigation.json'
             if investigation.is_file():result['investigation']=json.loads(investigation.read_text())
             ask_record=directory/'ask.json'
@@ -632,6 +682,7 @@ class Runner:
                 result['worker_status']='PARTIAL'
                 result['report']=result['report'].replace('Status: COMPLETE','Status: PARTIAL',1).replace('Risks:\n','Risks:\n'+mapping_issue+'. ',1)
                 result['completion'].update(remaining_issue=mapping_issue,next_action='frontier_decision')
+            if deterministic_verification:result['deterministic_verification']=deterministic_verification
             if mapping_result:result['mappings']=mapping_result
             if spec_result:result['spec_verification']=spec_result
             if report and report['status']=='COMPLETE' and check_failure:
@@ -709,6 +760,10 @@ class Runner:
 
     async def scheduler(self):
         while True:
+            from .integration import enabled
+            if not enabled():
+                await asyncio.sleep(0.3)
+                continue
             job=self.store.next()
             if job:await self.run(job)
             else:await asyncio.sleep(0.3)

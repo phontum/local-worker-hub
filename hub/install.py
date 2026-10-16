@@ -32,7 +32,7 @@ behavior, then record acceptance/rejection/takeover through record_review. A rej
 reason code (truncated, wrong_edit, oversized, no_change, check_failed, scope, wrong_localization, context_missing, other);
 after you finish your own edits on such a job call record_outcome so the diff you shipped is kept for evaluation. These
 records are what routing advice and any later Editor fine-tuning learn from, so skipping them wastes the data.
-The hub calls Ollama directly through its native chat API: installed OpenCode V2 does not forward
+The hub calls standalone llama.cpp through its chat completions API: installed OpenCode V2 does not forward
 scoped MCP tools to the model. Do not substitute the permissive legacy agent.
 
 ## What to delegate
@@ -239,6 +239,23 @@ Codex's uppercase AGENTS.md is required on Linux. If you are a delegated worker,
 execute only your bounded assignment and return the report; do not delegate again.
 '''
 
+LEGACY_WORKFLOW=WORKFLOW.replace('The hub calls standalone llama.cpp through its chat completions API','The hub calls Ollama directly through its native chat API')
+WORKFLOW += """
+## Integration switch and experiments
+
+`local-worker off` detaches owned Claude/Codex integrations and blocks submissions and applies.
+`local-worker on` restores removed components; use a fresh frontier session after switching.
+The standalone fallback is `~/dev/local-worker-hub/scripts/local-worker-switch on|off|status`.
+Experimental learning is opt-in through reviewed project profiles. When lifecycle hooks supply
+an observation ID, record keep/delegate intent before editing with record_task_decision and
+call finish_frontier_task only after the original task is finished. Shadow results remain sealed
+until then and can never be applied. Review structural comparisons separately from semantic
+correctness; met requirement claims need evidence. Approved recipe versions and minimized
+alternatives still produce private patches requiring frontier review and guarded apply.
+"""
+MANAGED_WORKFLOW='<!-- LOCAL-WORKER:START -->\n'+WORKFLOW+'\n<!-- LOCAL-WORKER:END -->\n'
+
+
 def prepare():
     initialize()
     from .skills.coding.validation.profiles import seed_profiles
@@ -289,7 +306,7 @@ def activate():
     launcher=names[0]
     launcher.write_text(f'#!/bin/sh\nexec "{PROJECT}/.venv/bin/python" -m hub.cli "$@"\n')
     launcher.chmod(0o755)
-    for path in names[1:3]:path.write_text(WORKFLOW)
+    for path in names[1:3]:path.write_text(MANAGED_WORKFLOW)
     codex=names[3]
     codex.write_text(text+f'\n[mcp_servers.local-worker]\ncommand = "{launcher}"\nargs = ["mcp"]\nstartup_timeout_sec = 30\ntool_timeout_sec = 30\n')
     claude=names[4]
@@ -328,7 +345,7 @@ def update_workflow():
     backup=CONFIG/'workflow-backups'/str(time.time_ns());backup.mkdir(parents=True,mode=0o700)
     for path in paths:
         shutil.copy2(path,backup/(path.parent.name+'-'+path.name))
-        path.write_text(WORKFLOW)
+        path.write_text(MANAGED_WORKFLOW)
         manifest['installed'][str(path)]=hashlib.sha256(path.read_bytes()).hexdigest()
     manifest_path.write_text(json.dumps(manifest,indent=2));manifest_path.chmod(0o600)
     print('Updated identical Codex/Claude workflow; preserved private backup and uninstall manifest.')

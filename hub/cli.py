@@ -39,6 +39,19 @@ def exit_code(state, worker_status, error=None):
 
 def main():
     os.umask(0o077)
+    if len(sys.argv)>1 and sys.argv[1] in ('on','off','integration'):
+        from .integration import switch_on, switch_off, status
+        command=sys.argv[1]
+        if command=='integration' and sys.argv[2:]!=['status']:
+            raise SystemExit('Usage: local-worker integration status')
+        value={'on':switch_on,'off':switch_off,'integration':status}[command]()
+        print(json.dumps(value,indent=2))
+        print('Use a fresh Claude/Codex session after switching.',file=sys.stderr)
+        if value.get('residual'):raise SystemExit(2)
+        return
+    if len(sys.argv)>1 and sys.argv[1]=='hook':
+        from .hooks import main as hooks
+        hooks(sys.argv[2:]);return
     if len(sys.argv)>1 and sys.argv[1]=='tools':
         p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('--job-dir',required=True)
         from .scoped import serve_tools
@@ -51,6 +64,21 @@ def main():
         serve();return
     from .client import call
     command=sys.argv[1] if len(sys.argv)>1 else ''
+    if command=='experiments':
+        p=argparse.ArgumentParser(description='Private task observations and approved deterministic recipes')
+        p.add_argument('command');p.add_argument('action',choices=['tasks','decision','finish','compare','review','recipes','propose','recipe-review','run','graph'])
+        p.add_argument('--repo',default=str(Path.cwd()));p.add_argument('--task-id');p.add_argument('--json-file');p.add_argument('--include-source',action='store_true')
+        args=p.parse_args();body=json.loads(Path(args.json_file).read_text()) if args.json_file else {}
+        if args.action=='tasks':method,path='GET','/api/tasks'
+        elif args.action=='recipes':method,path='GET','/api/recipes?'+urlencode({'repo':args.repo})
+        elif args.action in ('finish','compare','review'):
+            if not args.task_id:p.error('--task-id is required')
+            method='GET' if args.action=='compare' else 'POST'
+            path='/api/tasks/'+quote(args.task_id,safe='')+('/comparison?include_source='+str(args.include_source).lower() if args.action=='compare' else '/'+args.action)
+        else:
+            method='POST';body.setdefault('repo',args.repo)
+            path={'decision':'/api/tasks/decision','propose':'/api/recipes/mine','recipe-review':'/api/recipes/review','run':'/api/recipes/run','graph':'/api/change-links'}[args.action]
+        print(json.dumps(call(method,path,body if method=='POST' else None),indent=2));return
     if command=='web':
         p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('action',choices=['status','configure','setup-searxng'])
         p.add_argument('provider',choices=['exa','langsearch','searxng'],nargs='?');p.add_argument('--port',type=int,default=8888);p.add_argument('--yes',action='store_true');args=p.parse_args()
@@ -249,7 +277,7 @@ def main():
         import shutil,subprocess
         from .model_registry import models, probe, residency
         result={'model':MODEL,'models':{alias:{**value,**probe(value['name'])} for alias,value in models().items()},'loaded':residency(),'context':16384,'project':str(PROJECT),'state':str(STATE),
-            'opencode':shutil.which('opencode'),'ollama':shutil.which('ollama')}
+            'opencode':shutil.which('opencode'),'llama_server':shutil.which('llama-server')}
         from .skills.research.browser_page import status as browser_status
         result['browser']=browser_status()
         try:result['opencode_version']=subprocess.check_output(['opencode','--version'],text=True,timeout=10).strip()
@@ -257,12 +285,7 @@ def main():
         aws=Path.home()/'.aws'
         import psutil
         memory=psutil.virtual_memory();result['host_memory_mb']={'total':memory.total//2**20,'available':memory.available//2**20}
-        try:
-            environment=subprocess.check_output(['systemctl','show','ollama','--property=Environment'],text=True,timeout=10)
-            result['ollama_prompt_cache_limit']=next((part.split('=',1)[1].strip('"') for part in environment.replace('Environment=','').split() if part.strip('"').startswith('LLAMA_ARG_CACHE_RAM=')),None)
-        except Exception:result['ollama_prompt_cache_limit']='unknown'
-        if not result['ollama_prompt_cache_limit'] or result['ollama_prompt_cache_limit']=='unknown':
-            result['memory_note']='llama.cpp prompt cache lives in host RAM and defaults to 8 GB; on a small host set LLAMA_ARG_CACHE_RAM=512 (MiB) in the Ollama service environment. The hub also unloads models when available RAM drops below '+str(LOW_MEMORY_MB)+' MB.'
+        result['memory_note']='llama.cpp uses a bounded 512 MiB prompt cache in the managed service; low host memory refuses new inference.'
         result['codex_sandbox_note']='Protected .aws symlink can prevent Codex shell sandbox startup; credentials and sandbox are unchanged.' if aws.is_symlink() else None
         print(json.dumps(result,indent=2));return
     delegate=len(sys.argv)>1 and sys.argv[1]=='delegate'

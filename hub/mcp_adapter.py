@@ -30,6 +30,48 @@ def create_server():
     server=FastMCP('local-worker-hub')
 
     @server.tool(annotations=WRITE)
+    def record_task_decision(client:str,session_id:str,task_key:str,repo:str,decision:str,spec:dict,reason:str='',observation_paths:list[str]|None=None)->dict:
+        """Record keep/delegate before editing; capture a common baseline. Never supplies shadow content."""
+        return call('POST','/api/tasks/decision',dict(client=client,session_id=session_id,task_key=task_key,repo=repo,
+            decision=decision,spec=spec,reason=reason,observation_paths=observation_paths or []))
+
+    @server.tool(annotations=WRITE)
+    def finish_frontier_task(task_id:str,outcome:str='completed',answer:str|None=None)->dict:
+        """Freeze the shipped outcome only when the frontier task is finished."""
+        return call('POST','/api/tasks/'+task_id+'/finish',{'outcome':outcome,'answer':answer})
+
+    @server.tool(annotations=READ)
+    def get_task_comparison(task_id:str,include_source:bool=False)->dict:
+        """Explicit post-completion comparison; unfinished task results stay sealed."""
+        return call('GET','/api/tasks/'+task_id+'/comparison?'+urlencode({'include_source':str(include_source).lower()}))
+
+    @server.tool(annotations=WRITE)
+    def record_comparison_review(task_id:str,labels:list[str],requirements:dict,evidence:dict,notes:str)->dict:
+        """Record evidence-backed requirement fulfillment separately from structural similarity."""
+        return call('POST','/api/tasks/'+task_id+'/review',dict(labels=labels,requirements=requirements,evidence=evidence,notes=notes))
+
+    @server.tool(annotations=READ)
+    def list_recipes(repo:str)->list:
+        return call('GET','/api/recipes?'+urlencode({'repo':repo}))
+
+    @server.tool(annotations=WRITE)
+    def review_recipe(repo:str,recipe_id:str,decision:str,notes:str)->dict:
+        return call('POST','/api/recipes/review',dict(repo=repo,id=recipe_id,decision=decision,notes=notes))
+
+    @server.tool(annotations=WRITE)
+    def run_recipe(repo:str,recipe_id:str,parameters:dict,allowed_paths:list[str],checks:list[dict],idempotency_key:str)->dict:
+        """Produce a private patch from an approved recipe; normal frontier review/apply remains required."""
+        return call('POST','/api/recipes/run',dict(repo=repo,id=recipe_id,parameters=parameters,allowed_paths=allowed_paths,checks=checks,idempotency_key=idempotency_key))
+
+    @server.tool(annotations=WRITE)
+    def propose_recipes(repo:str)->list:
+        return call('POST','/api/recipes/mine',{'repo':repo})
+
+    @server.tool(annotations=WRITE)
+    def explain_change_links(repo:str,changed:list[str],include_git:bool=True,exclude_task:str|None=None)->dict:
+        return call('POST','/api/change-links',dict(repo=repo,changed=changed,include_git=include_git,exclude_task=exclude_task))
+
+    @server.tool(annotations=WRITE)
     def investigate_code(repo: str, question: str, read_paths: list[str] | None=None, kind: str='explain', idempotency_key: str | None=None, handoff_id: str | None=None) -> dict:
         """Ask the local worker to investigate code (read-only): find all code involved in X, explain how X works, where a config value is used, compare two implementations, or check whether a requirement is implemented. kind is one of find_code, explain, config_use, compare, check_requirement. The report gives host-verified path:line references; a COMPLETE report always has at least one. Returns a job id immediately."""
         if kind not in INVESTIGATOR_KINDS:raise ValueError('kind must be one of '+', '.join(INVESTIGATOR_KINDS))
@@ -155,11 +197,16 @@ def create_server():
         return {'id':job['id'],'state':job['state']}
 
     @server.tool(annotations=WRITE)
+    def select_minimized_candidate(job_id: str, notes: str, idempotency_key: str) -> dict:
+        """Queue a reviewed smaller alternative privately with all original checks; apply the new result separately."""
+        return call('POST',job_path(job_id)+'/select-candidate',{'notes':notes,'idempotency_key':idempotency_key})
+
+    @server.tool(annotations=WRITE)
     def record_review(job_id: str, decision: str, notes: str='', baseline_frontier_tokens: int | None=None,
                       delegated_frontier_tokens: int | None=None, baseline_frontier_cost: float | None=None,
                       delegated_frontier_cost: float | None=None, measurement_source: str='measured',
                       task_outcome: str | None=None, review_effort_seconds: int | None=None, reason: str | None=None,
-                      baseline_usage: dict | None=None, delegated_usage: dict | None=None) -> dict:
+                      baseline_usage: dict | None=None, delegated_usage: dict | None=None, patch_labels: list[str] | None=None, requirements: dict | None=None, requirement_evidence: dict | None=None) -> dict:
         """Record frontier acceptance/rejection/takeover. A rejected or takeover review must say why in notes (at least 10 characters) and should give a reason (truncated, wrong_edit, oversized, no_change, check_failed, scope, wrong_localization, context_missing, other): real failures become regression cases. Baselines must include orchestration, review, retries and takeover usage.
 
         Optional baseline_usage/delegated_usage hold observed full-task receipts:
@@ -174,7 +221,7 @@ def create_server():
             delegated_frontier_tokens=delegated_frontier_tokens,baseline_frontier_cost=baseline_frontier_cost,
             delegated_frontier_cost=delegated_frontier_cost,measurement_source=measurement_source,
             task_outcome=task_outcome,review_effort_seconds=review_effort_seconds,reason=reason,
-            baseline_usage=baseline_usage,delegated_usage=delegated_usage)
+            baseline_usage=baseline_usage,delegated_usage=delegated_usage,patch_labels=patch_labels or [],requirements=requirements or {},requirement_evidence=requirement_evidence or {})
         job=call('POST',job_path(job_id)+'/review',review.model_dump())
         return {'id':job['id'],'review':job['review']}
 
@@ -247,4 +294,6 @@ def create_server():
     return server
 
 def main():
+    from .integration import require_enabled
+    require_enabled()
     create_server().run(transport='stdio')

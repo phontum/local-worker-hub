@@ -41,7 +41,7 @@ def counted(jobs, include_history=False):
 
 def is_real(job):
     """A job a frontier agent or a person delegated, as opposed to a benchmark or imported history."""
-    return (job['request'].get('caller') or 'cli') not in NOT_REAL
+    return job['request'].get('purpose')!='shadow' and (job['request'].get('caller') or 'cli') not in NOT_REAL
 
 def languages(paths):
     return sorted({LANGUAGES.get(Path(p).suffix.lower(), 'other') for p in paths})
@@ -58,10 +58,15 @@ def final_diff(job, jobs_dir=None):
     origin = Path(record['origin'])
     bases = [workspace.ROOT / member / 'base' for member in record.get('chain', [ident])]
     chunks, files = [], []
+    baseline, worker, frontier = {}, {}, {}
     for name in record['allowed']:
         saved = next((b / name for b in bases if (b / name).is_file()), None)
         before = saved.read_text(errors='replace').splitlines(keepends=True) if saved else []
-        target = origin / name
+        target = workspace._guard_target(origin, name)
+        if saved:baseline[name]=''.join(before)
+        candidate=Path(record['path'])/name
+        if candidate.is_file() and not candidate.is_symlink():worker[name]=candidate.read_text(errors='replace')
+        if target.is_file() and not target.is_symlink():frontier[name]=target.read_text(errors='replace')
         after = target.read_text(errors='replace').splitlines(keepends=True) if target.is_file() and not target.is_symlink() else []
         delta = list(difflib.unified_diff(before, after, 'a/' + name, 'b/' + name))
         if delta:
@@ -69,8 +74,16 @@ def final_diff(job, jobs_dir=None):
             files.append({'path': name, 'added': sum(1 for l in delta if l.startswith('+') and not l.startswith('+++')),
                           'removed': sum(1 for l in delta if l.startswith('-') and not l.startswith('---'))})
     directory = Path(jobs_dir or STATE / 'jobs') / ident
-    summary = {'available': True, 'files': files, 'changed_files': len(files), 'bytes': sum(len(c) for c in chunks), 'captured': time.time()}
+    from hub.skills.coding.intelligence.structural import compare
+    comparison=compare(baseline,worker,frontier)
+    for arm in ('worker','frontier'):
+        for entry in comparison[arm]:
+            entry.pop('literal_changes',None)
+            for edit in entry['edits']:edit.pop('old',None);edit.pop('new',None)
+    summary = {'comparison':comparison,'available': True, 'files': files, 'changed_files': len(files), 'bytes': sum(len(c) for c in chunks), 'captured': time.time()}
     if directory.is_dir():
+        snapshots=directory/'snapshots';snapshots.mkdir(exist_ok=True,mode=0o700)
+        saved_contents=snapshots/'frontier.json';saved_contents.write_text(json.dumps(frontier));saved_contents.chmod(0o600)
         out = directory / 'final-frontier.diff'
         out.write_text(''.join(chunks))
         out.chmod(0o600)
@@ -117,7 +130,7 @@ def stats(jobs, include_eval=False):
              'accept_rate': round(entry['accepted'] / entry['reviewed'], 3)} for (role, kind), entry in sorted(table.items(), key=lambda kv: (kv[0][0] or '', kv[0][1]))]
 
 
-SCHEMA = 1
+SCHEMA = 2
 
 def read_text(path, limit=2_000_000):
     try:
@@ -163,7 +176,7 @@ def dataset_record(job, directory=None, include_source=False):
               'local': {'status': result.get('worker_status'), 'changed_files': result.get('changed_files', []), 'checks': [{'name': c.get('name'), 'status': c.get('status'), 'failures': len(c.get('failures') or [])} for c in result.get('checks', [])],
                         'spec_verification': {k: v for k, v in (result.get('spec_verification') or {}).items() if k != 'results'} or None},
               'frontier': {'decision': review.get('decision'), 'reason': review.get('reason'), 'effort_seconds': review.get('review_effort_seconds'), 'task_outcome': review.get('task_outcome'),
-                           'notes_chars': len(review.get('notes', '')), 'final_diff': shipped}}
+                           'notes_chars': len(review.get('notes', '')), 'patch_labels':review.get('patch_labels',[]), 'requirements':review.get('requirements',{}), 'final_diff': shipped}}
     if include_source:
         record['source'] = {'task': request.get('task'), 'prompt': prompt_of(directory), 'local_patch': read_text(directory / 'job.diff') or read_text(directory / 'patch.diff'),
                             'final_frontier_diff': read_text(directory / 'final-frontier.diff'), 'review_notes': review.get('notes')}

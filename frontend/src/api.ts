@@ -27,6 +27,7 @@ export type Job = { id: string; state: string; created: number; started: number 
   result: { report?: string; answer?: string; error?: string; worker_status?: string; report_valid?: boolean;
     usage?: Record<string, number>; changed_files?: string[]; truncated?: boolean; report_origin?: string; source_job_id?: string;
     metrics?: { queue_seconds: number; check_seconds: number; analysis_seconds: number; execution_seconds: number; recovery_count: number };
+    experiments?: { review_score?: number[]; hunks?: Array<{ id: string; path: string; origin: string; rationale: string; criteria: string[] }>; minimization?: { reason?: string; alternative_hash?: string; selected_hash?: string }; causal_required_passed?: boolean | null; metamorphic_required_passed?: boolean | null };
     ask?: Ask | null;
     workspace?: { state: string; origin: string; patch: string; origin_unchanged: boolean } | null; acceptance?: Acceptance | null;
     response_bytes?: number; checks?: Check[]; attempts?: Attempt[]; research_plans?: string[]; board?: Board | null;

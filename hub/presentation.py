@@ -75,6 +75,7 @@ def result_summary(job):
     refs += [c['artifact'] for c in checks if c.get('artifact')]
     refs += [c['artifact'] for attempt in r.get('attempts',[]) for c in attempt.get('checks',[]) if c.get('artifact')]
     if r.get('investigation'):refs.append('work.investigation.json')
+    if r.get('experiments'):refs.append('experiments.json')
     value = {k:r.get(k) for k in ('report','worker_status','report_valid','usage','model','workspace_verified','repo','error','metrics','report_origin','source_job_id','completion')}
     value.update(id=job['id'], ready=True, state=job['state'], checks=checks, checks_failed=any(failed(c) for c in checks),
                  changed_files=r.get('changed_files',[])[:20], changed_file_count=len(r.get('changed_files',[])),
@@ -87,6 +88,12 @@ def result_summary(job):
     if r.get('workspace'):value.update(workspace=live_workspace(job),acceptance=r.get('acceptance'));value['artifacts']=[*refs,'patch.diff']
     elif r.get('acceptance'):value['acceptance']=r['acceptance']
     if r.get('spec_verification'):value['spec_verification']={k:v for k,v in r['spec_verification'].items() if k!='results'}|{'results':r['spec_verification']['results'][:20]}
+    if r.get('experiments'):
+        experiments=r['experiments'];review=experiments.get('review',{})
+        value['experiments']={'review_score':review.get('review_score'),'hunks':review.get('hunks',[])[:12],
+            'minimization':{k:v for k,v in experiments.get('minimization',{}).items() if k in ('reason','alternative_hash','selected_hash')},
+            'causal_required_passed':experiments.get('causal',{}).get('required_passed'),
+            'metamorphic_required_passed':experiments.get('metamorphic',{}).get('required_passed')}
     if r.get('proposed_split'):value['proposed_split']=r['proposed_split'];value['gate']=r.get('gate')
     parsed=parse_report(r.get('report') or '')
     if parsed:value['answer']=parsed['findings'][:3000]

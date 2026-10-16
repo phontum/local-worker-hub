@@ -3,6 +3,7 @@ import sqlite3
 import time
 import uuid
 from .settings import STATE, initialize, pricing
+from .skills.coding.execution.control import active_operation, active_queue
 
 TERMINAL = {'completed', 'failed', 'cancelled', 'timed_out', 'interrupted'}
 
@@ -29,7 +30,10 @@ class Store:
         db.execute('PRAGMA journal_mode=WAL')
         return db
 
+    @active_operation
     def submit(self, request):
+        from .integration import require_enabled
+        require_enabled()
         payload = request.model_dump_json()
         with self.connect() as db:
             row = db.execute('SELECT * FROM jobs WHERE key=?', (request.idempotency_key,)).fetchone()
@@ -42,6 +46,8 @@ class Store:
             ident = uuid.uuid4().hex
             db.execute('INSERT INTO jobs (id,key,request,state,created,started,ended,result,review) VALUES (?,?,?,?,?,?,?,?,?)',
                 (ident, request.idempotency_key, payload, 'queued', time.time(), None, None, None, None))
+            if request.purpose!='shadow':
+                db.execute("UPDATE jobs SET state='cancelled',ended=? WHERE state='running' AND json_extract(request,'$.purpose')='shadow'",(time.time(),))
         return self.get(ident)
 
     @staticmethod
@@ -54,13 +60,17 @@ class Store:
     def get(self, ident):
         with self.connect() as db: return self.decode(db.execute('SELECT * FROM jobs WHERE id=?', (ident,)).fetchone())
 
-    def list(self, limit=100):
+    def list(self, limit=100, include_shadow=False):
         with self.connect() as db:
-            return [self.decode(r) for r in db.execute('SELECT * FROM jobs ORDER BY created DESC LIMIT ?', (limit,))]
+            where='' if include_shadow else "WHERE COALESCE(json_extract(request,'$.purpose'),'production')!='shadow'"
+            return [self.decode(r) for r in db.execute('SELECT * FROM jobs '+where+' ORDER BY created DESC LIMIT ?', (limit,))]
 
+    @active_queue
     def next(self):
+        from .integration import enabled
+        if not enabled():return None
         with self.connect() as db:
-            row = db.execute("SELECT * FROM jobs WHERE state='queued' ORDER BY created LIMIT 1").fetchone()
+            row = db.execute("SELECT * FROM jobs WHERE state='queued' ORDER BY CASE WHEN json_extract(request,'$.purpose')='shadow' THEN 1 ELSE 0 END,created LIMIT 1").fetchone()
             if not row: return None
             n = db.execute("UPDATE jobs SET state='running',started=? WHERE id=? AND state='queued'", (time.time(),row['id'])).rowcount
         return self.get(row['id']) if n else None
@@ -141,7 +151,7 @@ class Store:
             since = outcomes.epoch()
         if since is not None and until is not None and since >= until:
             raise ValueError('since must be earlier than until')
-        clauses, params = [], []
+        clauses, params = ["COALESCE(json_extract(j.request,'$.purpose'),'production')!='shadow'"], []
         if since is not None:
             clauses.append('j.created >= ?'); params.append(since)
         if until is not None:

@@ -5,11 +5,13 @@ import subprocess
 from pathlib import Path
 from pydantic import BaseModel, Field
 from hub.models import Check, JobRequest
+from hub.skills.coding.execution.options import ExperimentPolicy
 from hub.settings import CONFIG
 from .templates import refuse_unfilled
 
 
 class ProjectProfile(BaseModel):
+    experiments: ExperimentPolicy = Field(default_factory=ExperimentPolicy)
     repo: str
     constraints: str = Field(max_length=12000)
     prerequisites: list[str] = Field(default_factory=list)
@@ -90,7 +92,7 @@ def expand_profile(request):
     if request.checks and [c.model_dump() for c in request.checks] != checks:
         raise ValueError('Commands do not match the reviewed profile')
     data = request.model_dump()
-    data.update(checks=checks, context=p.constraints)
+    data.update(checks=checks, context=p.constraints, experiments=p.experiments.model_dump())
     return JobRequest.model_validate(data)
 
 

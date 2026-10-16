@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""Install a user service around an existing standalone llama-server and GGUF."""
+import argparse
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import os
+
+p=argparse.ArgumentParser()
+p.add_argument('--binary',default=shutil.which('llama-server'))
+p.add_argument('--model',required=True)
+p.add_argument('--context',type=int,choices=[16384,32768],default=16384)
+p.add_argument('--alias',default='gemma4:12b-it-qat')
+a=p.parse_args()
+if not a.binary:p.error('Install standalone llama.cpp first or provide --binary')
+binary=Path(a.binary).expanduser().absolute();model=Path(a.model).expanduser().resolve(strict=True)
+if not binary.is_file() or not os.access(binary,os.X_OK):p.error('llama-server must be executable')
+if model.open('rb').read(4)!=b'GGUF':p.error('Model must be a GGUF file')
+# Quote for systemd ExecStart (not a shell); escape specifiers too.
+def quote(value):return '"'+str(value).replace('%','%%').replace('\\','\\\\').replace('"','\\"')+'"'
+args=[binary,'--model',model,'--alias',a.alias,'--host','127.0.0.1','--port','8080','--ctx-size',str(a.context),'--parallel','1','--gpu-layers','99','--flash-attn','on','--cache-type-k','q8_0','--cache-type-v','q8_0','--cache-ram','512','--jinja','--cors-origins','http://127.0.0.1:8080,http://localhost:8080']
+unit='[Unit]\nDescription=Local Worker standalone llama.cpp inference\nAfter=network.target\n[Service]\nExecStart='+' '.join(quote(x) for x in args)+'\nRestart=on-failure\nRestartSec=5\n[Install]\nWantedBy=default.target\n'
+target=Path.home()/'.config/systemd/user/local-worker-llama.service';target.parent.mkdir(parents=True,exist_ok=True)
+if target.is_symlink():p.error('Refusing symlink service unit')
+if target.exists():
+    import time
+    backup=target.with_name(target.name+'.backup-'+str(time.time_ns()));shutil.copyfile(target,backup);backup.chmod(0o600)
+fd,name=tempfile.mkstemp(dir=target.parent,prefix='.llama-unit-')
+with os.fdopen(fd,'w') as output:output.write(unit)
+os.replace(name,target)
+subprocess.run(['systemctl','--user','daemon-reload'],check=True)
+subprocess.run(['systemctl','--user','enable','--now','local-worker-llama.service'],check=True)
+print('llama.cpp user service enabled. Verify readiness: curl --fail http://127.0.0.1:8080/health')

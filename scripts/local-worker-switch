@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+worker_project=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$worker_project"
+case "${1:-}" in
+  on|off) exec "$worker_project/.venv/bin/python" -m hub.cli "$1" ;;
+  status) exec "$worker_project/.venv/bin/python" -m hub.cli integration status ;;
+  *) echo 'Usage: local-worker-switch on|off|status' >&2; exit 2 ;;
+esac

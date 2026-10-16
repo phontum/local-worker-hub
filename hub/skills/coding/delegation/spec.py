@@ -12,6 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from hub.skills.coding.editing import mappings
 from hub.skills.coding.intelligence.codeindex import analyze
 from hub.models import Check, JobRequest, default_timeout
+from hub.skills.coding.execution.options import ExperimentPolicy
+from hub.skills.coding.editing.recipes import Operation
 
 MECHANICAL = ('file_unchanged', 'symbol_exists', 'symbol_absent', 'no_new_files', 'check_passes')
 EDITOR_KINDS = ('mechanical', 'guard', 'regression_test', 'fix_test')
@@ -32,6 +34,7 @@ class Change(Strict):
     mappings: list[Mapping] = Field(default_factory=list, max_length=40)
 
 class Criterion(Strict):
+    id: str | None = Field(default=None,max_length=120)
     """A condition on the result. The mechanical kinds are verified by the host; `text` is for the frontier to judge."""
     kind: Literal['file_unchanged', 'symbol_exists', 'symbol_absent', 'no_new_files', 'check_passes', 'text'] = 'text'
     path: str | None = Field(default=None, max_length=300)
@@ -61,6 +64,9 @@ class Scope(Strict):
     delete: list[str] = Field(default_factory=list, max_length=10)
 
 class DelegationSpec(Strict):
+    experiments: ExperimentPolicy = Field(default_factory=ExperimentPolicy)
+    deterministic_operations: list[Operation] = Field(default_factory=list,max_length=80)
+    deterministic_only: bool = False
     goal: str = Field(min_length=1, max_length=4000)
     kind: Literal['find_code', 'explain', 'config_use', 'compare', 'check_requirement', 'mechanical', 'guard', 'regression_test', 'run_tests', 'fix_test'] | None = None
     targets: list[Target] = Field(default_factory=list, max_length=30)
@@ -74,7 +80,7 @@ class DelegationSpec(Strict):
     check_groups: list[str] = Field(default_factory=list, max_length=12)
     preset: Literal['small', 'work', 'extended'] = 'work'
     handoff_id: str | None = Field(default=None, max_length=200)
-    execution_mode: Literal['model','literal'] = 'model'
+    execution_mode: Literal['model','literal','hybrid'] = 'model'
 
     def all_mappings(self):
         return [(m.old, m.new) for change in self.changes for m in change.mappings]
@@ -119,6 +125,7 @@ def compile_spec(spec, repo, caller='mcp', idempotency_key=None):
                   checks=spec.checks, profile_ref=spec.profile_ref, check_groups=spec.check_groups, execution_preset=spec.preset, caller=caller,
                   timeout=default_timeout(role, spec.preset), idempotency_key=idempotency_key or uuid.uuid4().hex, spec=spec.model_dump(mode='json'),
                   literal_mappings=[m for change in spec.changes for m in change.mappings] if role=='editor' else [],execution_mode=spec.execution_mode)
+    kwargs.update(experiments=spec.experiments,deterministic_operations=spec.deterministic_operations,deterministic_only=spec.deterministic_only)
     if role == 'editor':
         kwargs.update(allowed_paths=edit, delete_paths=spec.scope.delete)
         if spec.checks or spec.profile_ref:

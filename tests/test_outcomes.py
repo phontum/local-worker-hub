@@ -105,9 +105,9 @@ def test_the_dataset_record_is_structure_only_by_default_and_complete_with_sourc
     (directory / 'final-frontier.json').write_text(_json.dumps({'available': True, 'changed_files': 1}))
     (directory / 'final-frontier.diff').write_text('+x = 9\n')
     plain = out.dataset_record(job, directory)
-    assert plain['schema'] == 1 and plain['kind'] == 'mechanical' and plain['local']['status'] == 'PARTIAL' and plain['local']['checks'] == [{'name': 'unit', 'status': 'failed', 'failures': 1}]
+    assert plain['schema'] == 2 and plain['kind'] == 'mechanical' and plain['local']['status'] == 'PARTIAL' and plain['local']['checks'] == [{'name': 'unit', 'status': 'failed', 'failures': 1}]
     assert plain['context']['files'] == {'a.py': {'lines': 2, 'shown': 2, 'whole': True, 'ranges': [[1, 2]]}} and plain['turns'][0]['errors'] == 1
-    assert plain['frontier'] == {'decision': 'takeover', 'reason': 'wrong_edit', 'effort_seconds': None, 'task_outcome': None, 'notes_chars': 17, 'final_diff': {'available': True, 'changed_files': 1}}
+    assert plain['frontier'] == {'decision': 'takeover', 'reason': 'wrong_edit', 'effort_seconds': None, 'task_outcome': None, 'notes_chars': 17, 'patch_labels': [], 'requirements': {}, 'final_diff': {'available': True, 'changed_files': 1}}
     assert plain['local_tokens'] == 120 and len(plain['spec_sha256']) == 64
     assert 'source' not in plain and 'PRIVATE' not in _json.dumps(plain)
     full = out.dataset_record(job, directory, include_source=True)
@@ -131,7 +131,7 @@ def test_the_dataset_endpoint_and_cli_write_jsonl(store, origin, tmp_path, monke
     headers = {'Authorization': 'Bearer ' + initialize()}
     with TestClient(create_app(store, start_workers=False), base_url='http://127.0.0.1:8765') as c:
         body = c.get('/api/dataset', headers=headers).json()
-        assert body['schema'] == 1 and len(body['records']) == 1 and 'source' not in body['records'][0]
+        assert body['schema'] == 2 and len(body['records']) == 1 and 'source' not in body['records'][0]
         assert c.get('/api/dataset?include_source=true&kinds=fix_test', headers=headers).json()['records'] == []
         monkeypatch.setattr(client, 'call', lambda method, path, data=None: c.request(method, path, headers=headers).json())
         target = tmp_path / 'out.jsonl'

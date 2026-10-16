@@ -98,7 +98,8 @@ def test_the_inference_gateway_allows_an_8192_output_budget_only_for_jobs_that_a
         class Upstream:
             status_code=200
             async def aiter_lines(self):
-                yield json.dumps({'message':{'content':'x'},'done':True,'done_reason':'stop','eval_count':1,'prompt_eval_count':1})
+                yield 'data: '+json.dumps({'choices':[{'delta':{'content':'x'},'finish_reason':'stop'}],'usage':{'completion_tokens':1,'prompt_tokens':1}})
+                yield 'data: [DONE]'
             async def aclose(self):pass
         class Client:
             def build_request(self,*a,**k):return None

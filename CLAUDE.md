@@ -7,7 +7,7 @@ here. Read [README.md](README.md) for installation and
 ## Architecture and ownership
 
 Local Worker Hub is a Python FastAPI service with a React/TypeScript dashboard,
-CLI and stdio MCP adapter. Native Ollama chat powers bounded roles; one FIFO
+CLI and stdio MCP adapter. Standalone llama.cpp chat powers bounded roles; one FIFO
 executor and one inference slot are intentional. `legacy/` is archived and must
 not replace the scoped runtime.
 
@@ -54,7 +54,7 @@ the job machinery, and coding areas import only downward; `tests/test_import_bou
 
 - Default model is Gemma 4 12B (`gemma4:12b-it-qat`); the junior-task eval (`benchmarks/eval_junior.py`, results in
   `benchmarks/RESULTS.md`) put it ahead of Qwen3.5 9B (90.9% vs 78.8% correct, 3 vs 11 COMPLETE-but-wrong) on two small fixtures; re-run it
-  before changing the default. 16K context and concurrency one; 32K is opt-in. Only one model is resident at a time (`OLLAMA_MAX_LOADED_MODELS=1`);
+  before changing the default. 16K context and concurrency one; 32K is opt-in. Only one model is resident at a time (one llama.cpp server slot);
   model names live in `hub/model_registry.py`. Do not promote experimental settings without
   measured evaluation.
 - Default paths are host-driven pipelines without tool calling (docs/WORKFLOWS.md): ask

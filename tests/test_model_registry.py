@@ -47,6 +47,8 @@ async def test_engine_requests_the_profile_model(tmp_path,monkeypatch,profile,ex
         seen.append(body['model'])
         return {'message':{'role':'assistant','content':'LOCAL_WORKER_REPORT\nStatus: COMPLETE\nFindings:\nHi\nFiles:\nNone\nChecks:\nNot run\nRisks:\nNone\nEND_LOCAL_WORKER_REPORT'},'done_reason':'stop'}
     monkeypatch.setattr(engine,'chat_response',response)
+    async def supported(spec):return None
+    monkeypatch.setattr(engine,'model_support',supported)
     await engine.run(directory,'work','Hello')
     assert seen and set(seen)=={expected}
 
